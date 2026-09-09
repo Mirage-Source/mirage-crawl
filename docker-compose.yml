@@ -1,0 +1,26 @@
+services:
+  crawl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      CRAWL_HOST: 0.0.0.0
+      CRAWL_PORT: 8080
+    volumes:
+      # Named volumes, not bind mounts -- a bind mount's ownership comes from
+      # the host directory, not the image, so it would silently reintroduce
+      # the same non-root-write permission bug the Dockerfile just fixed.
+      # config/ is seeded from the image's own config/crawler_ranges.json on
+      # first creation (Docker populates a new named volume from the image
+      # directory it overlays); refresh_ranges.py then writes into it via
+      # `docker compose exec crawl ...` (see deploy notes for the cron entry).
+      - crawl_data:/app/data
+      - crawl_config:/app/config
+    ports:
+      - "80:8080"
+    restart: unless-stopped
+
+volumes:
+  crawl_data:
+  crawl_config:
