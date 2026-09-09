@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Published crawler IP ranges, used for the `cidr` verification path.",
+    "",
+    "VERIFY THESE BEFORE RELYING ON THEM. Operators change their blocks and",
+    "their publication URLs. The `sources` list below is where each operator",
+    "documents its ranges; refresh with scripts/refresh_ranges.py.",
+    "",
+    "An operator absent from `operators` yields an `unverifiable` verdict, not",
+    "an `impersonating` one, so an incomplete file is safe -- it loses signal",
+    "rather than fabricating accusations. An operator present but with a stale",
+    "block will produce false impersonation verdicts, which is why refresh",
+    "matters more than completeness."
+  ],
+  "sources": {
+    "OpenAI": [
+      "https://openai.com/gptbot.json",
+      "https://openai.com/searchbot.json",
+      "https://openai.com/chatgpt-user.json"
+    ],
+    "Anthropic": [
+      "https://www.anthropic.com/anthropic-crawler.json"
+    ],
+    "Perplexity": [
+      "https://www.perplexity.com/perplexitybot.json",
+      "https://www.perplexity.com/perplexity-user.json"
+    ],
+    "Apple": [
+      "https://search.developer.apple.com/applebot.json"
+    ],
+    "Amazon": [
+      "https://developer.amazon.com/amazonbot.json"
+    ],
+    "DuckDuckGo": [
+      "https://duckduckgo.com/duckduckgo-help-pages/results/duckduckbot/"
+    ],
+    "Google": [
+      "https://developers.google.com/static/search/apis/ipranges/googlebot.json",
+      "https://developers.google.com/static/search/apis/ipranges/special-crawlers.json"
+    ],
+    "Microsoft": [
+      "https://www.bing.com/toolbox/bingbot.json"
+    ]
+  },
+  "operators": {}
+}
