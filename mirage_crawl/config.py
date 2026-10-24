@@ -73,7 +73,12 @@ class Config:
     # payload, which is the only stage with wallet addresses in it. The decoys
     # are static JSON and nothing is ever executed.
     hunt_decoys: bool = True
-    hunt_body_bytes: int = 65_536
+
+    # Request bodies are read once, on every route, up to body_bytes. The
+    # sha256 covers everything captured; the event carries a prefix of
+    # body_log_bytes so one hostile upload cannot bloat the log.
+    body_bytes: int = 65_536
+    body_log_bytes: int = 16_384
 
     # Header carrying the JA4 fingerprint, injected by the TLS front.
     ja4_header: str = "X-Mirage-JA4"
@@ -99,7 +104,9 @@ class Config:
             trust_proxy_header=os.environ.get("CRAWL_TRUST_PROXY_HEADER", ""),
             proxy_listen=os.environ.get("CRAWL_PROXY_LISTEN", ""),
             hunt_decoys=_flag("CRAWL_HUNT_DECOYS", True),
-            hunt_body_bytes=_int("CRAWL_HUNT_BODY_BYTES", 65_536),
+            # CRAWL_HUNT_BODY_BYTES is the old name, kept as an alias.
+            body_bytes=_int("CRAWL_BODY_BYTES", _int("CRAWL_HUNT_BODY_BYTES", 65_536)),
+            body_log_bytes=_int("CRAWL_BODY_LOG_BYTES", 16_384),
             ja4_header=os.environ.get("CRAWL_JA4_HEADER", "X-Mirage-JA4"),
         )
         if not cfg.origin:

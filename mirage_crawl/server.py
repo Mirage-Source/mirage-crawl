@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import socket
 import stat
 import time
@@ -29,7 +30,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import beacons, eventlog, hunt, policies
+from . import beacons, capture, eventlog, hunt, policies
 from .config import Config
 from .fingerprint import build as build_fingerprint
 from .identity import RangeTable, VerifierCache
@@ -164,6 +165,10 @@ class Sensor:
         self._beacon_cache[key] = (token, now)
         return token
 
+    def emit(self, request: web.Request, kind: str, **fields) -> None:
+        """Log an event tied to this request, so all of a request's events join on rid."""
+        self.log.emit(kind, rid=request.get("rid"), **fields)
+
     def trap(self, standard: str, ip: str, ua: str) -> str:
         return policies.trap_path(standard, self.mint(standard, ip, ua))
 
@@ -222,11 +227,17 @@ class Sensor:
         ip, ja4 = self.client_identity(request, listener)
         ua = request.headers.get("User-Agent", "")
 
-        raw_names = [name.decode("latin-1") for name, _ in request.raw_headers]
-        if listener == LISTENER_FRONT:
-            raw_names = _without_first(
-                raw_names, {"x-forwarded-for", self.config.ja4_header.lower()}
-            )
+        injected = (
+            {"x-forwarded-for", self.config.ja4_header.lower()}
+            if listener == LISTENER_FRONT else set()
+        )
+        raw_names = _without_first(
+            [name.decode("latin-1") for name, _ in request.raw_headers], injected
+        )
+        headers, headers_truncated = capture.header_pairs(request.raw_headers, injected)
+        raw_path, raw_query = capture.split_raw(request.raw_path)
+        request["rid"] = secrets.token_hex(8)
+        request["body"] = await capture.read_body(request, self.config.body_bytes)
         version = f"{request.version.major}.{request.version.minor}"
         fp = build_fingerprint(user_agent=ua, raw_header_names=raw_names, http_version=version)
         request["fp"] = fp
@@ -243,12 +254,17 @@ class Sensor:
 
         duration_us = int((time.perf_counter() - start) * 1_000_000)
 
-        self.log.emit(
+        self.emit(
+            request,
             eventlog.EVENT_REQUEST,
             ip=ip,
             method=request.method,
             path=request.path,
             query=request.query_string or None,
+            raw_path=raw_path,
+            raw_query=raw_query,
+            headers=headers,
+            headers_truncated=headers_truncated,
             host=request.headers.get("Host"),
             http_version=version,
             ua=ua[:400],
@@ -272,6 +288,7 @@ class Sensor:
             resource=request.get("resource_kind"),
             content_hash=request.get("content_hash"),
             fork_of=request.get("fork_of"),
+            **capture.body_fields(request["body"], self.config.body_log_bytes),
         )
 
         self._schedule_identity(ip, fp)
@@ -296,7 +313,8 @@ class Sensor:
         token = tokens.pop(policy.standard)
 
         request["resource_kind"] = "policy"
-        self.log.emit(
+        self.emit(
+            request,
             eventlog.EVENT_POLICY_READ,
             ip=ip,
             standard=policy.standard,
@@ -461,7 +479,8 @@ class Sensor:
         beacon = beacons.find_in_path(self.secret, path)
         if beacon is not None:
             same_ip = beacon.matches_ip(ip)
-            self.log.emit(
+            self.emit(
+                request,
                 eventlog.EVENT_TRAP_HIT,
                 ip=ip,
                 path=path,
@@ -500,7 +519,8 @@ class Sensor:
                 if path == policies.STABLE_DISALLOW_UNLINKED
                 else "stable_allow_unlinked"
             )
-            self.log.emit(
+            self.emit(
+                request,
                 eventlog.EVENT_TRAP_HIT,
                 ip=ip,
                 path=path,
@@ -533,18 +553,14 @@ class Sensor:
         ip, fp = request["ip"], request["fp"]
         request["resource_kind"] = f"hunt:{probe.family}"
 
-        body = ""
-        if request.method in ("POST", "PUT", "PATCH"):
-            try:
-                raw = await request.content.read(self.config.hunt_body_bytes)
-                body = raw.decode("utf-8", "replace")
-            except Exception:
-                body = ""
+        captured: capture.Body | None = request["body"]
+        body = captured.text() if captured is not None else ""
 
         surface = f"{request.path}?{request.query_string}\n{body}"
         findings = hunt.scan_payload(surface)
 
-        self.log.emit(
+        self.emit(
+            request,
             eventlog.EVENT_HUNT,
             ip=ip,
             method=request.method,
@@ -558,8 +574,9 @@ class Sensor:
             ua=fp.user_agent[:400],
             claimed_crawler=fp.claimed_crawler,
             ja4=request["ja4"],
-            body_bytes=len(body),
-            body=body[:4000] if body else None,
+            # The body itself is on the request event (same rid); not duplicated here.
+            body_bytes=len(captured.data) if captured is not None else 0,
+            body_sha256=capture.body_fields(captured, 0).get("body_sha256"),
             indicators=findings.as_dict() if findings.any() else None,
             decoy_served=bool(probe.decoy is not None and self.config.hunt_decoys),
         )
