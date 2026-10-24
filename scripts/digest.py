@@ -168,10 +168,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("log_dir", nargs="?", default="data/events")
     ap.add_argument("--days", type=int, default=3)
     ap.add_argument("--out-dir", default="")
+    ap.add_argument("--emit", action="store_true",
+                    help="print {summary, report} as one JSON envelope to stdout "
+                         "(for a locked-down SSH forced-command publish)")
     args = ap.parse_args(argv)
 
     d = build_digest(args.log_dir, args.days)
     report = render_report(d)
+
+    if args.emit:
+        print(json.dumps({"summary": d, "report": report}))
+        return 0
 
     if args.out_dir:
         out = Path(args.out_dir)
