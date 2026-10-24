@@ -115,6 +115,12 @@ PROBES: tuple[Probe, ...] = (
     _p(r"^/api/tags/?$", "ollama", "Ollama", CATEGORY_LLM,
        "enumerate locally hosted models before abusing them for free inference",
        ("T1046", "T1496"), _OLLAMA_TAGS),
+    # Ollama and Ray both answer /api/version. Ollama's shape goes first: it
+    # is the more heavily scanned of the two. Per-port personas remove the
+    # ambiguity properly (Ollama on :11434, Ray on :8265).
+    _p(r"^/api/version/?$", "ollama", "Ollama", CATEGORY_LLM,
+       "fingerprint the Ollama build before choosing an exploit", ("T1046", "T1592"),
+       json.dumps({"version": "0.1.32"})),
     _p(r"^/api/(generate|chat|pull|push|create)/?$", "ollama", "Ollama", CATEGORY_LLM,
        "drive or poison a local model server", ("T1496",),
        json.dumps({"model": "llama3:8b", "done": True, "response": ""})),
@@ -129,7 +135,7 @@ PROBES: tuple[Probe, ...] = (
        "read GPU inventory before queueing work on it", ("T1082", "T1496"), _COMFY_STATS),
 
     # -- GPU / ML infrastructure ------------------------------------------
-    _p(r"^/api/(jobs|version|serve/applications|cluster_status)/?", "ray", "Ray dashboard",
+    _p(r"^/api/(jobs|serve/applications|cluster_status)/?", "ray", "Ray dashboard",
        CATEGORY_GPU, "submit arbitrary jobs to a GPU cluster (ShadowRay pattern)",
        ("T1190", "T1496", "T1610"), _RAY_VERSION),
     _p(r"^/(api/kernels|api/sessions|api/contents|tree|lab)(/|$)", "jupyter", "Jupyter",

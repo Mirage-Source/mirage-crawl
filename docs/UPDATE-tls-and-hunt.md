@@ -208,5 +208,6 @@ neutral observation, and it belongs in the ethics section of anything you
 publish.
 
 The ceiling is the same one mirage-core holds and it is worth restating: the
-sensor imports no process-execution module, nothing is ever run, and no packet
-ever leaves. Set `CRAWL_HUNT_DECOYS=false` to observe without baiting.
+sensor imports no process-execution module, nothing is ever run, and nothing it
+is sent is ever fetched or resolved. Its only outbound packets are the DNS
+lookups for identity verification. Set `CRAWL_HUNT_DECOYS=false` to observe without baiting.

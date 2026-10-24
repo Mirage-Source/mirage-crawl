@@ -34,6 +34,9 @@ def test_probe_matching() -> None:
         "/api/tags": ("ollama", "llm_inference"),
         "/v1/chat/completions": ("openai_compat", "llm_inference"),
         "/api/jobs/": ("ray", "gpu_ml"),
+        # Both Ollama and Ray serve /api/version. Ollama's is the far more
+        # scanned of the two, so its shape wins until per-port routing exists.
+        "/api/version": ("ollama", "llm_inference"),
         "/system_stats": ("comfyui", "gpu_ml"),
         "/api/kernels": ("jupyter", "gpu_ml"),
         "/ws/v1/cluster/apps/new-application": ("yarn", "crypto_mining"),

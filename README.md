@@ -335,10 +335,19 @@ is deliberately attractive to scrapers.
 
 ## Limits, honestly
 
-**No TLS fingerprinting.** JA3/JA4 requires the raw ClientHello, which means
-terminating TLS yourself and peeking at the handshake. That is the strongest
-identity signal that exists and it is not here yet. Header order is the
-substitute and it is weaker.
+**JA4 needs the TLS front, and only covers :443.** JA4 is computed from the raw
+ClientHello by `mirage_crawl.tlsfront`, which has to terminate TLS itself (a
+stock reverse proxy consumes the ClientHello before the sensor sees it).
+Plain-HTTP traffic on :80 has header order as its only fingerprint, which is
+weaker. Requests through a configured proxy listener carry neither: the header
+order is the proxy's and there is no JA4.
+
+**Outbound traffic is identity lookups, nothing else.** The sensor never
+fetches a URL it is sent, never resolves a hostname found in a payload, and
+never calls a model. The only packets it originates are the reverse and forward
+DNS lookups for FCrDNS identity verification (`CRAWL_VERIFY_IDENTITY=false`
+turns those off too). Payload URLs, pool hosts and C2 addresses are recorded as
+strings and left alone.
 
 **Cached policy files blunt per-request beacons.** A crawler that fetched
 `robots.txt` yesterday and crawls today carries a token from yesterday — which
