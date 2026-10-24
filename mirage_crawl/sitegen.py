@@ -206,16 +206,22 @@ class Site:
         )
 
     def canary(self, path: str) -> str:
-        """A unique, searchable string planted in every page.
+        """A unique, searchable token planted in every page.
 
         If one of these ever turns up in a model's output, that page reached
-        training data. The prefix is deliberately distinctive so it can be
-        grepped for across corpora and probed for in model responses.
+        training data. It is disguised as an ordinary content-revision hash
+        (see server rendering) so it is not itself a honeypot tell: a visible
+        `MIRAGE-CANARY-...` string would announce what the host is. The 64-bit
+        hex is still unique enough to grep for across a corpus, and survives
+        HTML-to-text extraction because it is rendered as visible text.
+
+        Fix-once: the value is derived from the seed, so it is stable only as
+        long as the seed is. Changing either regenerates every canary and
+        breaks provenance for anything already crawled.
         """
-        digest = hashlib.blake2s(
+        return hashlib.blake2s(
             f"{self.seed}:canary:{path}".encode("utf-8"), digest_size=8
         ).hexdigest()
-        return f"MIRAGE-CANARY-{digest.upper()}"
 
     def all_page_paths(self) -> list[str]:
         return [

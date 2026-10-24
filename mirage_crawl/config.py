@@ -83,6 +83,12 @@ class Config:
     # Header carrying the JA4 fingerprint, injected by the TLS front.
     ja4_header: str = "X-Mirage-JA4"
 
+    # Server header sent on every response. aiohttp's default announces the
+    # Python/aiohttp stack, which is a honeypot tell; a plain, common value
+    # hides it. Per-persona overrides come later (a PHP persona wants a
+    # PHP-shaped Server + X-Powered-By).
+    server_header: str = "nginx"
+
     @classmethod
     def from_env(cls) -> "Config":
         cfg = cls(
@@ -108,6 +114,7 @@ class Config:
             body_bytes=_int("CRAWL_BODY_BYTES", _int("CRAWL_HUNT_BODY_BYTES", 65_536)),
             body_log_bytes=_int("CRAWL_BODY_LOG_BYTES", 16_384),
             ja4_header=os.environ.get("CRAWL_JA4_HEADER", "X-Mirage-JA4"),
+            server_header=os.environ.get("CRAWL_SERVER_HEADER", "nginx"),
         )
         if not cfg.origin:
             cfg.origin = f"http://localhost:{cfg.port}"

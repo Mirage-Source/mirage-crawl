@@ -138,6 +138,24 @@ def test_site() -> None:
     check("no fork points at itself", all(p.fork_of != p.pid for p in a.projects))
 
 
+def test_canary_disguise() -> None:
+    print("\ncanary disguise (fix-once)")
+    a = Site("s", projects=10, pages_per_project=4)
+    b = Site("s", projects=10, pages_per_project=4)
+    paths = a.all_page_paths()
+    canaries = [a.canary(p) for p in paths]
+
+    forbidden = ("mirage", "canary", "honeypot", "decoy", "trap")
+    bad = [c for c in canaries if any(w in c.lower() for w in forbidden)]
+    check("no canary contains a giveaway word", not bad, str(bad[:2]))
+    check("canary is a plausible lowercase hex revision",
+          all(len(c) >= 16 and all(ch in "0123456789abcdef" for ch in c) for c in canaries),
+          canaries[0] if canaries else "")
+    check("canary is unique per path", len(set(canaries)) == len(canaries))
+    check("canary is deterministic across instances", a.canary(paths[0]) == b.canary(paths[0]))
+    check("canary changes with the seed", Site("other").canary("/x") != Site("s").canary("/x"))
+
+
 def test_fingerprint() -> None:
     print("\nfingerprinting")
     name, operator, method = classify_ua("Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)")
@@ -363,6 +381,7 @@ if __name__ == "__main__":
     test_beacons()
     test_secret_loading()
     test_site()
+    test_canary_disguise()
     test_fingerprint()
     test_identity()
     test_states()

@@ -391,7 +391,7 @@ Policy: {origin}{trap}
 
 def _humans(trap: str, origin: str) -> str:
     return f"""/* TEAM */
-Research: Mirage
+Maintainer: Documentation Team
 Site: {origin}
 
 /* SITE */

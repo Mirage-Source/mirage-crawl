@@ -139,7 +139,8 @@ async def run() -> int:
 
             # 7. Liar: claims Chrome but sends almost no browser headers and
             #    never fetches the stylesheet or script.
-            await get(s, f"{base}/", "10.0.0.8", UA_LIAR)
+            _, liar_headers, liar_body = await get(s, f"{base}/", "10.0.0.8", UA_LIAR)
+            _, _, a_page = await get(s, f"{base}/docs/p000/00.html", "10.0.0.12", UA_LIAR)
 
             # 8. Every other policy surface responds.
             surface_status = {}
@@ -251,6 +252,15 @@ async def run() -> int:
         check("GPTBot recognised from UA", len(gptbot) >= 1)
         check("header order captured", bool(liar and len(liar[0]["header_order"]) >= 2))
         check("header order hashed", bool(liar and liar[0]["header_order_hash"]))
+
+        print("\nfingerprint resistance")
+        check("Server header is not the aiohttp default",
+              liar_headers.get("Server") == "nginx", liar_headers.get("Server"))
+        giveaways = ("mirage", "MIRAGE-CANARY", "honeypot", "decoy")
+        leaked = [w for w in giveaways if w.lower() in (liar_body + a_page).lower()]
+        check("no honeypot tell in served page bodies", not leaked, str(leaked))
+        check("canary still present as a revision string",
+              "Document revision" in a_page and "Document revision" in liar_body)
 
         print("\nmisc")
         check("unknown path 404s", st_404 == 404, f"got {st_404}")

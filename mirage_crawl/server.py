@@ -83,6 +83,15 @@ def _without_first(names: list[str], drop: set[str]) -> list[str]:
     return kept
 
 
+def _canary_footer(token: str) -> str:
+    """Plant a canary as what looks like an ordinary content-revision marker.
+
+    Visible text (so it survives HTML-to-text extraction into a corpus) that
+    reads as a static-site build hash rather than a flag.
+    """
+    return f'<hr><footer><small>Document revision {token}</small></footer>'
+
+
 def _page_shell(title: str, body: str, head: str = "") -> str:
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -259,6 +268,10 @@ class Sensor:
         except Exception:
             response = web.Response(status=500, text="internal error")
 
+        # Replace aiohttp's stack-revealing Server header on every response,
+        # successful or error.
+        response.headers["Server"] = self.config.server_header
+
         duration_us = int((time.perf_counter() - start) * 1_000_000)
 
         self.emit(
@@ -374,7 +387,7 @@ class Sensor:
             f'<a href="{nofollow}" rel="nofollow">Changelog archive</a></nav>'
             f"<ul>{links}</ul>"
             f'<div class="hidden"><a href="{hidden}">internal index</a></div>'
-            f"<p>{escape(self.site.canary('/'))}</p>"
+            + _canary_footer(escape(self.site.canary('/')))
         )
         request["resource_kind"] = "index"
         return web.Response(text=_page_shell("Example documentation", body), content_type="text/html")
@@ -436,7 +449,7 @@ class Sensor:
         body = (
             f"<h1>{escape(page.title)}</h1>{paragraphs}"
             f"<nav>{nav}</nav>"
-            f"<p><small>{escape(page.canary)}</small></p>"
+            f"{_canary_footer(escape(page.canary))}"
         )
         return web.Response(
             text=_page_shell(page.title, body),
@@ -522,8 +535,9 @@ class Sensor:
             )
             request["resource_kind"] = f"trap:{beacon.standard}"
             body = (
-                f"<h1>Internal</h1><p>{escape(self.site.canary(path))}</p>"
+                "<h1>Internal</h1>"
                 "<p>This document is not licensed for training use.</p>"
+                + _canary_footer(escape(self.site.canary(path)))
             )
             return web.Response(
                 text=_page_shell("Internal", body),
@@ -559,7 +573,7 @@ class Sensor:
             )
             request["resource_kind"] = kind
             return web.Response(
-                text=_page_shell("Notice", f"<p>{escape(self.site.canary(path))}</p>"),
+                text=_page_shell("Notice", _canary_footer(escape(self.site.canary(path)))),
                 content_type="text/html",
             )
 
