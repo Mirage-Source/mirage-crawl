@@ -213,6 +213,12 @@ class Sensor:
     async def record(self, request: web.Request, handler):
         start = time.perf_counter()
         listener = self.listener_of(request)
+        if listener == LISTENER_ADMIN:
+            # Operator traffic: served only /healthz, and never logged as a client.
+            request["listener"] = listener
+            if request.path == "/healthz":
+                return await self.health(request)
+            return web.Response(status=404, text="not found")
         ip, ja4 = self.client_identity(request, listener)
         ua = request.headers.get("User-Agent", "")
 
@@ -567,7 +573,11 @@ class Sensor:
         raise web.HTTPNotFound(text="not found")
 
     async def health(self, request: web.Request) -> web.Response:
-        request["resource_kind"] = "health"
+        # Sensor internals (decoys on, probe counts) are the clearest possible
+        # "this is a honeypot" tell. Anywhere but the admin socket, /healthz
+        # is just another unrouted path.
+        if request.get("listener") != LISTENER_ADMIN:
+            return await self.catch_all(request)
         return web.json_response(
             {
                 "ok": True,

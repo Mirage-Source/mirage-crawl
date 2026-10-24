@@ -150,8 +150,17 @@ async def run() -> int:
             # 9. Unknown paths 404 without minting anything.
             st_404, _, _ = await get(s, f"{base}/no/such/page", "10.0.0.10", UA_POLITE)
 
-            # 10. Health endpoint.
-            st_health, _, health_body = await get(s, f"{base}/healthz", "10.0.0.11", UA_POLITE)
+            # 10. /healthz is not on the face the internet sees.
+            st_health_front, _, health_front_body = await get(s, f"{base}/healthz", "10.0.0.11", UA_POLITE)
+            st_unrouted, _, unrouted_body = await get(s, f"{base}/healthz-nope", "10.0.0.11", UA_POLITE)
+
+        async with aiohttp.ClientSession() as pub:
+            st_health_public, _, _ = await get(pub, f"{public}/healthz", "6.6.6.6", UA_FORGER)
+
+        admin = aiohttp.UnixConnector(path=str(cfg.admin_socket))
+        async with aiohttp.ClientSession(connector=admin) as adm:
+            st_health, _, health_body = await get(adm, "http://admin/healthz", "-", "ops")
+            st_admin_other, _, _ = await get(adm, "http://admin/robots.txt", "-", "ops")
 
         await runner.cleanup()
 
@@ -247,8 +256,15 @@ async def run() -> int:
         check("unknown path 404s", st_404 == 404, f"got {st_404}")
         check("no trap minted for unknown path",
               not any(h["path"] == "/no/such/page" for h in hits))
-        check("health endpoint ok", st_health == 200 and json.loads(health_body)["ok"] is True)
+        check("health ok on the admin socket", st_health == 200 and json.loads(health_body)["ok"] is True)
         check("no events dropped", json.loads(health_body)["events_dropped"] == 0)
+        check("/healthz 404s on the public port", st_health_public == 404, str(st_health_public))
+        check("/healthz 404s through the front", st_health_front == 404, str(st_health_front))
+        check("that 404 is indistinguishable from any unrouted path",
+              st_unrouted == 404 and health_front_body == unrouted_body)
+        check("admin socket serves nothing but /healthz", st_admin_other == 404)
+        check("admin requests are not logged as client traffic",
+              not any(r.get("ua") == "ops" for r in requests))
 
         print(f"\n{len(events)} events across {len(list(Path(cfg.log_dir).glob('*.jsonl')))} file(s)")
         return 1 if failures else 0
