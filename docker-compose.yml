@@ -7,6 +7,15 @@ services:
     environment:
       CRAWL_HOST: 0.0.0.0
       CRAWL_PORT: 8080
+      # The front socket lives on the shared crawl_data volume so the tlsfront
+      # container can reach it. X-Forwarded-For and the JA4 header are trusted
+      # only on this socket, so only the front -- not any exposed port -- can
+      # set a client's address or fingerprint.
+      CRAWL_FRONT_SOCKET: /app/data/front.sock
+      CRAWL_ADMIN_SOCKET: /app/data/admin.sock
+      # Per-service persona ports. php needs an explicit port: its conventional
+      # one is already taken by the public site below.
+      CRAWL_PERSONA_PORTS: "ollama:11434,ray:8265,docker:2375,jupyter:8888,php:8081"
     volumes:
       # Named volumes, not bind mounts -- a bind mount's ownership comes from
       # the host directory, not the image, so it would silently reintroduce
@@ -18,7 +27,47 @@ services:
       - crawl_data:/app/data
       - crawl_config:/app/config
     ports:
+      # Public site on :80 (docs face by Host, attack face otherwise). The
+      # persona ports each impersonate one service. Expose only the personas
+      # you actually want scanned; every exposed port widens the target.
       - "80:8080"
+      - "11434:11434"   # ollama
+      - "8265:8265"     # ray dashboard
+      - "2375:2375"     # docker engine api
+      - "8888:8888"     # jupyter
+      - "8081:8081"     # php / wordpress face
+    restart: unless-stopped
+
+  # TLS terminator and JA4 fingerprinter. Shares crawl_data so it can connect
+  # to the front socket the crawl container opens; it never binds a backend
+  # port. Depends on certs mounted read-only at /certs.
+  tlsfront:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - python
+      - -m
+      - mirage_crawl.tlsfront
+      - --host=0.0.0.0
+      - --port=443
+      - --cert=/certs/fullchain.pem
+      - --key=/certs/privkey.pem
+      - --backend-socket=/app/data/front.sock
+      - --log-dir=/app/data/events
+      # A distinct sensor id so the front's TLS events land in their own log
+      # file rather than contending with the crawl process for one handle.
+      - --sensor-id=crawl-tls-01
+    volumes:
+      - crawl_data:/app/data
+      # Point this at your real certificate directory (certbot's live dir, a
+      # mounted secret, etc.). Read-only: the front never writes here.
+      # deploy/certs/ ships a README; the .pem files there are git-ignored.
+      - ./deploy/certs:/certs:ro
+    ports:
+      - "443:443"
+    depends_on:
+      - crawl
     restart: unless-stopped
 
 volumes:

@@ -70,7 +70,9 @@ DEFAULT_PORTS: dict[str, int] = {
     "ray": 8265,
     "docker": 2375,
     "jupyter": 8888,
-    "php": 8080,
+    # php has no default: a PHP site's conventional port (80/8080) is the one
+    # the public docs/attack site already holds, so an explicit port is
+    # required (CRAWL_PERSONA_PORTS=php:8081) rather than silently colliding.
 }
 
 _OLLAMA_404 = '{"error":"model not found, try pulling it first"}'

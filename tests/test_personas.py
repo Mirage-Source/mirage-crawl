@@ -33,7 +33,8 @@ def test_parse_and_match() -> None:
     check("several, mixed", personas.parse_ports("ollama, docker:2375 , jupyter")
           == [("ollama", 11434), ("docker", 2375), ("jupyter", 8888)])
     check("empty spec is no ports", personas.parse_ports("") == [])
-    for bad in ("nope", "ollama:notaport"):
+    check("php honours an explicit port", personas.parse_ports("php:8081") == [("php", 8081)])
+    for bad in ("nope", "ollama:notaport", "php"):  # php has no default port
         try:
             personas.parse_ports(bad)
             check(f"{bad!r} rejected", False)
