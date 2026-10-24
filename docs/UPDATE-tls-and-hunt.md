@@ -145,6 +145,57 @@ HTTP becomes one entity instead of two unrelated observations.
 
 ---
 
+## 3 · Faces, personas and actor sessions (Phase 3)
+
+A single sensor on one port has to guess, from the path alone, which product a
+probe is aimed at — and the guesses collide (Ollama and Ray both answer
+`/api/version`). Phase 3 removes the guessing in two ways.
+
+**Faces.** A request is routed to a *face* from (listener, Host header): the
+named hostname gets the `docs` face (the policy-instrumented site); a bare IP,
+a wrong name or no Host gets the `attack` face. Both faces serve *identical
+substantive rules* — this is instrumentation, not cloaking — and every event
+carries its `face` so per-face analysis needs no join.
+
+**Persona ports.** `CRAWL_PERSONA_PORTS=ollama:11434,ray:8265,docker:2375,
+jupyter:8888` binds one listener per service. On :11434 the request is for
+Ollama, full stop: matching is scoped to that persona's service families and
+the response carries that service's `Server` banner. Multi-stage decoys let a
+persona answer the *follow-up*: a Ray job submit returns a handle, polling it
+reports `RUNNING`; Docker create → start → inspect walks a container to
+"running". State is derived, never stored — an id is an HMAC of (sensor key,
+client ip, seed) — so the attacker sees a consistent world across restarts
+with no database, and nothing is ever executed.
+
+**The `php` face.** A WordPress/PHP persona (`php:8081`) that looks unpatched
+and exploitable. It classifies the *shape* of each request — path traversal,
+SQLi, `phpinfo`, CMS probes, and the PHP source / wrapper / webshell-upload
+shapes a freshly disclosed PHP bug draws — and answers with an inert,
+seed-derived page: a synthetic `nologin`-only passwd file, a generic DB-error
+page, a fake `phpinfo`, a WordPress login. The ceiling from `hunt.py` holds
+exactly: the vulnerability is never emulated (the attacker gets a plausible
+page, never confirmation a shell landed), nothing is executed or stored where
+anything could run, and every page is deterministic so no packet leaves. Full
+request capture happens upstream; `personas/webapp.py` only decides what the
+decoy says and tags the attempt (`web_attack=...`).
+
+> Two deliberate departures from the Phase 3 plan, for the record: the PHP
+> emulators (3.4) live on their *own persona port* rather than wired into the
+> public attack face, to keep the policy-instrumented site cleanly separate
+> from a deliberately-vulnerable webapp and make each port an operator opt-in;
+> and attacker sessions (3.5) are a *stateless per-event actor id* rather than
+> a stateful session table, which suits a sensor that keeps no state. The
+> per-session "stage reached" report is deferred to the Phase 6 evaluation.
+
+**Actor sessions.** Every event carries an `actor`: an HMAC of (ip, strongest
+available fingerprint) — the JA4 TLS stack when the front supplied one, else
+the header-order hash, recorded in `actor_basis`. Same client, same id across
+restarts, with no session table and no way back to the signing key. This is
+the join that turns a scatter of recon / exploit / payload events into one
+entity — the HTTP-side equivalent of the SSH correlation key above.
+
+---
+
 ## New files
 
 ```
@@ -167,6 +218,13 @@ mirage_crawl/
                  wallets, pools, miner binaries, URLs, JNDI and SSRF out of a
                  request body.
 
+  personas/      Per-service personas bound to their own ports (Phase 3).
+    __init__.py  The Persona dataclass, the persona set, and port parsing.
+    stages.py    Multi-stage decoy workflows (Ray job, Docker container) with
+                 state derived, not stored.
+    webapp.py    The php face: inert, seed-derived decoy pages for traversal /
+                 SQLi / phpinfo / CMS / webshell shapes. Executes nothing.
+
 tests/
   test_tls.py       Generates a throwaway certificate, boots the sensor and the
                     front, drives a real TLS client through it, and asserts the
@@ -175,6 +233,9 @@ tests/
   test_hunt_ja4.py  Probe matching, no collision with the sensor's own paths,
                     payload extraction including the base64 layer, JA4 shape
                     and sensitivity, and the keep-alive rewriter.
+  test_personas.py  Port parsing and family-scoped matching, multi-stage decoy
+                    determinism, the php face classifier (inertness, tagging,
+                    seed-derived stability), and all of it live over real HTTP.
 ```
 
 ## Changed files
