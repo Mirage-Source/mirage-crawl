@@ -24,6 +24,12 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _path_or_none(name: str, default: str) -> Path | None:
+    """A path setting where an empty value disables the feature."""
+    raw = os.environ.get(name, default)
+    return Path(raw) if raw else None
+
+
 @dataclass
 class Config:
     host: str = "0.0.0.0"
@@ -49,7 +55,18 @@ class Config:
     # reuse a token within this window. Set to 0 to mint on every request.
     beacon_reuse_seconds: int = 300
 
+    # Header trust is a property of the listener a request arrived on, never
+    # of the header itself. The TLS front connects over `front_socket`, and
+    # only requests on that socket may set X-Forwarded-For and the JA4 header.
+    # The admin socket serves /healthz and nothing else.
+    front_socket: Path | None = field(default_factory=lambda: Path("data/front.sock"))
+    admin_socket: Path | None = field(default_factory=lambda: Path("data/admin.sock"))
+
+    # For a reverse proxy you cannot avoid: requests on `proxy_listen`
+    # ("host:port") take their address from `trust_proxy_header`. Nothing on
+    # the public port ever does.
     trust_proxy_header: str = ""
+    proxy_listen: str = ""
 
     # Serve plausible responses to compute-hijack probes. A 404 ends the
     # interaction; a decoy makes the bot proceed to the stage that carries the
@@ -77,7 +94,10 @@ class Config:
             fork_every=_int("CRAWL_FORK_EVERY", 5),
             verify_identity=_flag("CRAWL_VERIFY_IDENTITY", True),
             beacon_reuse_seconds=_int("CRAWL_BEACON_REUSE_SECONDS", 300),
+            front_socket=_path_or_none("CRAWL_FRONT_SOCKET", "data/front.sock"),
+            admin_socket=_path_or_none("CRAWL_ADMIN_SOCKET", "data/admin.sock"),
             trust_proxy_header=os.environ.get("CRAWL_TRUST_PROXY_HEADER", ""),
+            proxy_listen=os.environ.get("CRAWL_PROXY_LISTEN", ""),
             hunt_decoys=_flag("CRAWL_HUNT_DECOYS", True),
             hunt_body_bytes=_int("CRAWL_HUNT_BODY_BYTES", 65_536),
             ja4_header=os.environ.get("CRAWL_JA4_HEADER", "X-Mirage-JA4"),

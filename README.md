@@ -322,8 +322,11 @@ host and let it be indexed.
 **Run it directly on :80, not behind a reverse proxy, if you can.** A proxy
 normalises header order and re-serialises the request, which costs you the
 strongest impersonation signal in the instrument. If you must proxy, set
-`CRAWL_TRUST_PROXY_HEADER` and accept that header-order fingerprinting becomes
-a fingerprint of your proxy.
+`CRAWL_TRUST_PROXY_HEADER` *and* `CRAWL_PROXY_LISTEN` (e.g. `127.0.0.1:8081`),
+and point the proxy at that listener. The header is trusted only there, never
+on the public port. Requests that arrive that way are logged with
+`"listener": "proxy"`: their header order is the proxy's, and they never carry
+a JA4.
 
 **Do not point it at a domain you care about.** It serves generated text that
 is deliberately attractive to scrapers.

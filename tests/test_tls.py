@@ -16,13 +16,12 @@ import tempfile
 from pathlib import Path
 
 import aiohttp
-from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mirage_crawl import eventlog, ja4 as ja4mod  # noqa: E402
 from mirage_crawl.config import Config  # noqa: E402
-from mirage_crawl.server import build_app  # noqa: E402
+from mirage_crawl.server import build_app, start_sites  # noqa: E402
 from mirage_crawl.tlsfront import Front, inject_headers  # noqa: E402
 
 failures: list[str] = []
@@ -83,18 +82,15 @@ async def run() -> int:
             ranges_file=Path("config/crawler_ranges.json"),
             projects=4, pages_per_project=3,
             verify_identity=False, beacon_reuse_seconds=0,
-            trust_proxy_header="X-Forwarded-For",
+            front_socket=tmp / "front.sock", admin_socket=tmp / "admin.sock",
         )
         app = build_app(cfg)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        await web.TCPSite(runner, "127.0.0.1", 0).start()
-        backend_port = runner.addresses[0][1]
+        runner = await start_sites(app, cfg)
 
         seen: list[tuple] = []
         front = Front(
             cert=cert, key=key,
-            backend_host="127.0.0.1", backend_port=backend_port,
+            backend_socket=str(cfg.front_socket),
             on_hello=lambda ip, fp, hello: seen.append((ip, fp, hello)),
         )
         server = await asyncio.start_server(front.handle, "127.0.0.1", 0)

@@ -3,8 +3,9 @@
     python -m mirage_crawl.tlsfront --cert fullchain.pem --key privkey.pem
 
 Sits on :443, computes JA4 from the raw ClientHello *before* the handshake
-completes, terminates TLS itself, and forwards plaintext to the sensor with the
-fingerprint and the real client address injected as headers.
+completes, terminates TLS itself, and forwards plaintext to the sensor's front
+Unix socket with the fingerprint and the real client address injected as
+headers. The sensor trusts those headers only on that socket.
 
 The handshake is driven manually through memory BIOs rather than
 `loop.start_tls`, because the ClientHello has to be read off the socket to be
@@ -141,16 +142,14 @@ class Front:
         self,
         cert: str,
         key: str,
-        backend_host: str,
-        backend_port: int,
+        backend_socket: str,
         ja4_header: str = "X-Mirage-JA4",
         on_hello=None,
     ) -> None:
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.load_cert_chain(cert, key)
         self.context.set_alpn_protocols(["http/1.1"])
-        self.backend_host = backend_host
-        self.backend_port = backend_port
+        self.backend_socket = backend_socket
         self.ja4_header = ja4_header
         self.on_hello = on_hello
 
@@ -216,10 +215,10 @@ class Front:
             writer.write(pending)
             await writer.drain()
 
-        # 3. Connect to the sensor and pump both directions.
-        backend_reader, backend_writer = await asyncio.open_connection(
-            self.backend_host, self.backend_port
-        )
+        # 3. Connect to the sensor and pump both directions. Over the front
+        #    socket, because that is the only listener on which the sensor
+        #    believes our X-Forwarded-For and JA4 headers.
+        backend_reader, backend_writer = await asyncio.open_unix_connection(self.backend_socket)
 
         # Whichever direction ends first ends the session, and the other is
         # cancelled. Awaiting both would deadlock: when the client goes away
@@ -310,14 +309,13 @@ async def serve(args) -> None:
     front = Front(
         cert=args.cert,
         key=args.key,
-        backend_host=args.backend_host,
-        backend_port=args.backend_port,
+        backend_socket=args.backend_socket,
         ja4_header=args.ja4_header,
         on_hello=log_hello if args.verbose else None,
     )
     server = await asyncio.start_server(front.handle, args.host, args.port)
     addresses = ", ".join(str(s.getsockname()) for s in server.sockets or ())
-    print(f"mirage-crawl TLS front on {addresses} -> {args.backend_host}:{args.backend_port}")
+    print(f"mirage-crawl TLS front on {addresses} -> {args.backend_socket}")
     async with server:
         await server.serve_forever()
 
@@ -328,8 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=443)
     parser.add_argument("--cert", required=True, help="PEM certificate chain")
     parser.add_argument("--key", required=True, help="PEM private key")
-    parser.add_argument("--backend-host", default="127.0.0.1")
-    parser.add_argument("--backend-port", type=int, default=8080)
+    parser.add_argument("--backend-socket", default="data/front.sock",
+                        help="the sensor's front socket (CRAWL_FRONT_SOCKET)")
     parser.add_argument("--ja4-header", default="X-Mirage-JA4")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)

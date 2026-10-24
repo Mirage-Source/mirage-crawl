@@ -16,19 +16,25 @@ headers it sends.
 ### Running it
 
 ```bash
-# terminal 1 — the sensor, plaintext, bound to localhost only
-CRAWL_HOST=127.0.0.1 CRAWL_PORT=8080 python run.py
+# terminal 1 — the sensor: public :80, plus data/front.sock for the front
+CRAWL_PORT=80 python run.py
 
-# terminal 2 — the TLS front on :443
+# terminal 2 — the TLS front on :443, talking to the sensor's front socket
 python -m mirage_crawl.tlsfront \
     --cert /etc/letsencrypt/live/docs.example.org/fullchain.pem \
     --key  /etc/letsencrypt/live/docs.example.org/privkey.pem \
-    --backend-port 8080 --verbose
+    --backend-socket data/front.sock --verbose
 ```
 
 The front buffers the ClientHello, computes JA4 *before* the handshake
 completes, terminates TLS itself, and forwards plaintext to the sensor with
 `X-Mirage-JA4` and the real client address injected as headers.
+
+The sensor believes those two headers **only on the front socket**. The same
+headers sent to the public port are logged as whatever the socket says (the
+real peer address, no JA4), so a client cannot forge its own fingerprint by
+skipping the front. The socket is created `0600`, so only the sensor's own
+user can connect to it.
 
 ### Why the handshake is driven by hand
 

@@ -20,8 +20,12 @@ Three things are measured that a plain access log cannot give you:
 from __future__ import annotations
 
 import asyncio
+import os
+import socket
+import stat
 import time
 from html import escape
+from pathlib import Path
 
 from aiohttp import web
 
@@ -42,6 +46,39 @@ SCRIPT = """(function(){
   try { fetch("{js_beacon}", {cache:"no-store"}); } catch (e) {}
 })();
 """
+
+
+LISTENER_PUBLIC = "public"
+LISTENER_FRONT = "front"
+LISTENER_PROXY = "proxy"
+LISTENER_ADMIN = "admin"
+
+
+def _sock_key(sockname) -> tuple | None:
+    """Normalise a socket name so a connection can be matched to its listener."""
+    if isinstance(sockname, (str, bytes)):
+        return ("unix", os.path.abspath(os.fsdecode(sockname)))
+    if isinstance(sockname, tuple) and len(sockname) >= 2:
+        return ("tcp", sockname[0], sockname[1])
+    return None
+
+
+def _without_first(names: list[str], drop: set[str]) -> list[str]:
+    """Remove the first occurrence of each name in `drop` (case-insensitive).
+
+    The TLS front inserts its headers right after the request line, having
+    stripped any client copies, so the first occurrence is always ours.
+    Removing it restores the client's own header order.
+    """
+    pending = set(drop)
+    kept = []
+    for name in names:
+        lowered = name.lower()
+        if lowered in pending:
+            pending.discard(lowered)
+            continue
+        kept.append(name)
+    return kept
 
 
 def _page_shell(title: str, body: str, head: str = "") -> str:
@@ -76,15 +113,35 @@ class Sensor:
         self._seen_identities: set[tuple[str, str]] = set()
         self.started_at = time.time()
 
+        # Filled in by start_sites(): socket name -> listener role.
+        self.listeners: dict[tuple, str] = {}
+        self.public_address: tuple | None = None
+        self.proxy_address: tuple | None = None
+
     # -- helpers -----------------------------------------------------------
 
-    def client_ip(self, request: web.Request) -> str:
-        header = self.config.trust_proxy_header
-        if header:
-            value = request.headers.get(header, "")
+    def listener_of(self, request: web.Request) -> str:
+        """Which listener a request arrived on. Unknown means public."""
+        transport = request.transport
+        sockname = transport.get_extra_info("sockname") if transport is not None else None
+        key = _sock_key(sockname)
+        return self.listeners.get(key, LISTENER_PUBLIC) if key else LISTENER_PUBLIC
+
+    def client_identity(self, request: web.Request, listener: str) -> tuple[str, str | None]:
+        """(client ip, ja4) as far as this listener is entitled to say."""
+        ip = request.remote or "127.0.0.1"
+        if listener == LISTENER_FRONT:
+            forwarded = request.headers.get("X-Forwarded-For", "")
+            if forwarded:
+                ip = forwarded.split(",")[0].strip()
+            return ip, request.headers.get(self.config.ja4_header) or None
+        if listener == LISTENER_PROXY and self.config.trust_proxy_header:
+            value = request.headers.get(self.config.trust_proxy_header, "")
             if value:
-                return value.split(",")[0].strip()
-        return request.remote or "0.0.0.0"
+                ip = value.split(",")[0].strip()
+        # A plain proxy terminated TLS itself, so it cannot know the client's
+        # JA4. Any JA4 header here is client-supplied.
+        return ip, None
 
     def mint(self, standard: str, ip: str, ua: str) -> str:
         """Mint a beacon, reusing one for the same client within the window."""
@@ -155,14 +212,21 @@ class Sensor:
     @web.middleware
     async def record(self, request: web.Request, handler):
         start = time.perf_counter()
-        ip = self.client_ip(request)
+        listener = self.listener_of(request)
+        ip, ja4 = self.client_identity(request, listener)
         ua = request.headers.get("User-Agent", "")
 
         raw_names = [name.decode("latin-1") for name, _ in request.raw_headers]
+        if listener == LISTENER_FRONT:
+            raw_names = _without_first(
+                raw_names, {"x-forwarded-for", self.config.ja4_header.lower()}
+            )
         version = f"{request.version.major}.{request.version.minor}"
         fp = build_fingerprint(user_agent=ua, raw_header_names=raw_names, http_version=version)
         request["fp"] = fp
         request["ip"] = ip
+        request["ja4"] = ja4
+        request["listener"] = listener
 
         try:
             response = await handler(request)
@@ -197,7 +261,8 @@ class Sensor:
             accept_language=fp.sends_accept_language,
             referer=request.headers.get("Referer"),
             signals=list(fp.signals),
-            ja4=request.headers.get(self.config.ja4_header),
+            ja4=ja4,
+            listener=listener,
             resource=request.get("resource_kind"),
             content_hash=request.get("content_hash"),
             fork_of=request.get("fork_of"),
@@ -486,7 +551,7 @@ class Sensor:
             mitre=list(probe.mitre),
             ua=fp.user_agent[:400],
             claimed_crawler=fp.claimed_crawler,
-            ja4=request.headers.get(self.config.ja4_header),
+            ja4=request["ja4"],
             body_bytes=len(body),
             body=body[:4000] if body else None,
             indicators=findings.as_dict() if findings.any() else None,
@@ -558,3 +623,78 @@ def build_app(config: Config) -> web.Application:
     app.on_startup.append(_on_start)
     app.on_cleanup.append(_on_stop)
     return app
+
+
+def _tcp_socket(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    return socket.create_server((host, port), family=family, backlog=512, reuse_port=False)
+
+
+def _unix_socket(path: Path) -> socket.socket:
+    path = Path(os.path.abspath(path))
+    if len(os.fsencode(path)) >= 104:  # sun_path is 104-108 bytes depending on OS
+        raise RuntimeError(f"socket path too long for AF_UNIX ({len(str(path))} chars): {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        # Only ever replace a stale socket, never some other file.
+        if not stat.S_ISSOCK(path.lstat().st_mode):
+            raise RuntimeError(f"{path} exists and is not a socket; refusing to replace it")
+        path.unlink()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old_umask = os.umask(0o177)  # socket file is created 0600: owner only
+    try:
+        sock.bind(str(path))
+    finally:
+        os.umask(old_umask)
+    sock.listen(512)
+    return sock
+
+
+async def start_sites(app: web.Application, config: Config) -> web.AppRunner:
+    """Start every listener and record which socket plays which role.
+
+    Trust is decided by listener: whatever arrives on the public port is
+    taken at face value from the socket, and only the front socket (and a
+    proxy listener, if configured) may supply a client address.
+    """
+    if config.trust_proxy_header and not config.proxy_listen:
+        raise ValueError(
+            "CRAWL_TRUST_PROXY_HEADER is set but CRAWL_PROXY_LISTEN is not. The header is "
+            "only trusted on a dedicated proxy listener; trusting it on the public port "
+            "would let any client forge its address."
+        )
+
+    sensor: Sensor = app["sensor"]
+    unix_paths = [
+        Path(os.path.abspath(path))
+        for path in (config.front_socket, config.admin_socket)
+        if path is not None
+    ]
+
+    async def _unlink(_app: web.Application) -> None:
+        for path in unix_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    app.on_cleanup.append(_unlink)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+
+    async def add(sock: socket.socket, role: str) -> tuple:
+        await web.SockSite(runner, sock).start()
+        name = sock.getsockname()
+        sensor.listeners[_sock_key(name)] = role
+        return name
+
+    sensor.public_address = await add(_tcp_socket(config.host, config.port), LISTENER_PUBLIC)
+
+    for path, role in ((config.front_socket, LISTENER_FRONT), (config.admin_socket, LISTENER_ADMIN)):
+        if path is not None:
+            await add(_unix_socket(path), role)
+
+    if config.proxy_listen:
+        host, _, port = config.proxy_listen.rpartition(":")
+        sensor.proxy_address = await add(_tcp_socket(host or "127.0.0.1", int(port)), LISTENER_PROXY)
+    return runner

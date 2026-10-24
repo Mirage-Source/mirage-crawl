@@ -2,8 +2,10 @@
 
 Each persona exercises one behaviour the instrument is supposed to be able to
 tell apart, and the assertions check that the event log actually distinguishes
-them. Distinct source addresses are simulated with X-Forwarded-For, which also
-exercises the proxy-header path.
+them. Distinct source addresses are simulated by talking to the sensor over its
+front socket with X-Forwarded-For set, which is exactly what the TLS front does.
+Header trust is never switched on globally: a separate block checks that the
+same headers sent to the public port are ignored.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mirage_crawl import eventlog, policies  # noqa: E402
 from mirage_crawl.config import Config  # noqa: E402
-from mirage_crawl.server import build_app  # noqa: E402
+from mirage_crawl.server import build_app, start_sites  # noqa: E402
 
 TOKEN_RE = re.compile(r"/([A-Za-z0-9_-]{26})/")
 
@@ -33,6 +35,8 @@ UA_DEFIANT = "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)"
 UA_MINER = "Mozilla/5.0 (compatible; ClaudeBot/1.0)"
 UA_READER = "Mozilla/5.0 (compatible; FleetReader/1.0)"
 UA_FETCHER = "Mozilla/5.0 (compatible; FleetFetcher/1.0)"
+UA_FORGER = "ForgerBot/1.0"
+UA_PROXIED = "ProxiedBot/1.0"
 UA_LIAR = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
 
 
@@ -67,17 +71,30 @@ async def run() -> int:
             pages_per_project=4,
             verify_identity=False,
             beacon_reuse_seconds=0,
-            trust_proxy_header="X-Forwarded-For",
+            front_socket=tmp / "front.sock",
+            admin_socket=tmp / "admin.sock",
+            trust_proxy_header="X-Real-IP",
+            proxy_listen="127.0.0.1:0",
         )
         app = build_app(cfg)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = runner.addresses[0][1]
-        base = f"http://127.0.0.1:{port}"
+        runner = await start_sites(app, cfg)
+        sensor = app["sensor"]
+        public = f"http://127.0.0.1:{sensor.public_address[1]}"
+        proxy = f"http://127.0.0.1:{sensor.proxy_address[1]}"
+        base = "http://docs.test.invalid"
 
-        async with aiohttp.ClientSession() as s:
+        # Header trust comes from the listener, never from the header itself.
+        async with aiohttp.ClientSession() as pub:
+            await get(pub, f"{public}/robots.txt", "6.6.6.6", UA_FORGER,
+                      headers={"X-Mirage-JA4": "forged-ja4", "X-Real-IP": "6.6.6.7"})
+            await get(pub, f"{proxy}/robots.txt", "6.6.6.8", UA_PROXIED,
+                      headers={"X-Real-IP": "7.7.7.7", "X-Mirage-JA4": "forged-ja4"})
+
+        front = aiohttp.UnixConnector(path=str(cfg.front_socket))
+        async with aiohttp.ClientSession(connector=front) as s:
+            await get(s, f"{base}/humans.txt", "10.0.0.20", UA_POLITE,
+                      headers={"X-Mirage-JA4": "t13d0000h1_front_ja4"})
+
             # 1. Polite: reads robots.txt, crawls only allowed content.
             status, _, robots = await get(s, f"{base}/robots.txt", "10.0.0.1", UA_POLITE)
             assert status == 200, "robots.txt should serve"
@@ -148,6 +165,27 @@ async def run() -> int:
             print(f"  {'PASS' if condition else 'FAIL'}  {name}" + (f"  ({detail})" if detail and not condition else ""))
             if not condition:
                 failures.append(name)
+
+        print("\nlistener trust")
+        forged = [r for r in requests if r["ua"] == UA_FORGER]
+        check("forged XFF on the public port ignored", bool(forged) and forged[0]["ip"] == "127.0.0.1",
+              str(forged[:1]))
+        check("forged JA4 on the public port ignored", bool(forged) and forged[0]["ja4"] is None)
+        check("public requests are labelled public", bool(forged) and forged[0]["listener"] == "public")
+        check("public request header order keeps the client's own XFF",
+              bool(forged) and "x-forwarded-for" in forged[0]["header_order"])
+        proxied = [r for r in requests if r["ua"] == UA_PROXIED]
+        check("proxy header honoured on the proxy listener",
+              bool(proxied) and proxied[0]["ip"] == "7.7.7.7", str(proxied[:1]))
+        check("JA4 never trusted from a plain proxy", bool(proxied) and proxied[0]["ja4"] is None)
+        check("proxied requests are labelled proxy", bool(proxied) and proxied[0]["listener"] == "proxy")
+        via_front = [r for r in requests if r["ip"] == "10.0.0.20"]
+        check("XFF kept through the front socket", len(via_front) == 1)
+        check("JA4 kept through the front socket",
+              bool(via_front) and via_front[0]["ja4"] == "t13d0000h1_front_ja4")
+        check("front-injected headers dropped from the header order",
+              bool(via_front) and "x-forwarded-for" not in via_front[0]["header_order"]
+              and "x-mirage-ja4" not in via_front[0]["header_order"], str(via_front[:1]))
 
         print("\nevent log")
         check("requests logged", len(requests) >= 25, f"got {len(requests)}")
