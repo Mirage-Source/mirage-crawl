@@ -64,6 +64,45 @@ def test_stage_determinism() -> None:
           '"running"' in stages.docker("GET", "/v1.43/containers/abc/json", "9.9.9.9", b"k").body)
 
 
+def test_webapp_classifier() -> None:
+    """The PHP face tags request shapes and always answers inertly."""
+    print("\nPHP web-app face (unit)")
+    from mirage_crawl.personas import webapp
+    key = b"seed-key"
+
+    def r(method="GET", path="/", query="", ctype="", body=""):
+        return webapp.respond(method, path, query, ctype, body, key)
+
+    # Each shape is classified; the response is a plausible, inert page.
+    trav = r(path="/download.php", query="file=../../../../etc/passwd")
+    check("traversal is tagged", trav.kind == "path_traversal", trav.kind)
+    check("traversal gets a synthetic passwd, every shell nologin",
+          "/usr/sbin/nologin" in trav.body and trav.body.count("nologin") == trav.body.count(":x:"))
+    check("double-encoded traversal still caught",
+          r(path="/a.php", query="f=%252e%252e%252f%252e%252e%252fetc%252fpasswd").kind == "path_traversal")
+
+    sqli = r(path="/item.php", query="id=1 UNION SELECT 1,2,3")
+    check("sqli is tagged", sqli.kind == "sqli", sqli.kind)
+    check("sqli gets a DB error, not a result set", sqli.status == 500 and "Database Error" in sqli.body)
+
+    shell = r(method="POST", path="/upload.php", ctype="multipart/form-data; boundary=x",
+              body="<?php echo 1; ?>")
+    check("php body/upload is tagged as an rce attempt", shell.kind == "php_rce_attempt", shell.kind)
+    check("rce attempt gets an ordinary page, no confirmation",
+          shell.status == 200 and "shell" not in shell.body.lower())
+
+    check("phpinfo probe tagged", r(path="/phpinfo.php").kind == "info_disclosure")
+    check("wp-login probe tagged", r(path="/wp-login.php").kind == "cms_probe")
+    check("root is a browse, served a landing page", r(path="/").kind == "browse" and r(path="/").status == 200)
+    check("unknown path is a 404 browse", r(path="/nope").status == 404)
+
+    # Determinism: the fake world is stable across restarts.
+    other = webapp.respond("GET", "/x.php", "file=../../../../etc/passwd", "", "", b"different-key")
+    check("fake passwd is seed-derived", trav.body != other.body)
+    check("same seed, same page",
+          webapp.respond("GET", "/download.php", "file=../../../../etc/passwd", "", "", key).body == trav.body)
+
+
 async def get(session, url, **kw):
     async with session.get(url, **kw) as resp:
         return resp.status, resp.headers, await resp.text()
@@ -83,13 +122,14 @@ async def test_live() -> None:
             secret_file=tmp / "secret", ranges_file=Path("config/crawler_ranges.json"),
             projects=4, pages_per_project=3, verify_identity=False,
             front_socket=None, admin_socket=None,
-            persona_ports="ollama:0,ray:0",
+            persona_ports="ollama:0,ray:0,php:0",
         )
         app = build_app(cfg)
         runner = await start_sites(app, cfg)
         sensor = app["sensor"]
         ollama_port = sensor.persona_addresses["ollama"][1]
         ray_port = sensor.persona_addresses["ray"][1]
+        php_port = sensor.persona_addresses["php"][1]
         public_port = sensor.public_address[1]
 
         async with aiohttp.ClientSession() as s:
@@ -109,6 +149,10 @@ async def test_live() -> None:
                                       data=b'{"entrypoint":"python -c \\"x\\""}')
             job_id = json.loads(submit)["job_id"]
             poll_status, _, poll = await get(s, f"http://127.0.0.1:{ray_port}/api/jobs/{job_id}")
+
+            # The PHP face: a traversal gets a page and a tagged event.
+            php_status, php_headers, php_body = await get(
+                s, f"http://127.0.0.1:{php_port}/download.php?file=../../../../etc/passwd")
 
         await runner.cleanup()
         events = list(eventlog.read_events(cfg.log_dir))
@@ -138,6 +182,18 @@ async def test_live() -> None:
         staged = [e for e in hunts if e.get("stage")]
         check("staged hunt events are flagged and attributed to ray",
               len(staged) == 2 and all(e["family"] == "ray" for e in staged), str(len(staged)))
+
+        print("\nPHP web-app face (live)")
+        check("PHP face answers the traversal with a page", php_status == 200)
+        check("PHP face carries an Apache banner", php_headers.get("Server") == "Apache/2.4.57 (Debian)",
+              php_headers.get("Server"))
+        check("PHP face carries X-Powered-By", php_headers.get("X-Powered-By") == "PHP/8.1.27",
+              php_headers.get("X-Powered-By"))
+        check("served a synthetic passwd, not a real file", "/usr/sbin/nologin" in php_body)
+        web = [e for e in hunts if e.get("web_attack")]
+        check("the traversal is logged, tagged, attributed to php",
+              len(web) == 1 and web[0]["web_attack"] == "path_traversal" and web[0]["family"] == "php",
+              str([(e.get("web_attack"), e["family"]) for e in web]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -145,6 +201,7 @@ async def test_live() -> None:
 if __name__ == "__main__":
     test_parse_and_match()
     test_stage_determinism()
+    test_webapp_classifier()
     asyncio.run(test_live())
     print("\nFAILURES: " + ", ".join(failures) if failures else "\nall persona checks passed")
     sys.exit(1 if failures else 0)

@@ -329,6 +329,8 @@ class Sensor:
         # Replace aiohttp's stack-revealing Server header on every response.
         # A persona sets its own via request["server_header"].
         response.headers["Server"] = request.get("server_header") or self.config.server_header
+        for name, value in request.get("extra_headers", ()):
+            response.headers[name] = value
 
         duration_us = int((time.perf_counter() - start) * 1_000_000)
 
@@ -695,7 +697,38 @@ class Sensor:
         service answers something on its own port rather than going silent.
         """
         request["server_header"] = persona.server_header
+        if persona.extra_headers:
+            request["extra_headers"] = persona.extra_headers
         fp = request["fp"]
+
+        # A web-app face answers every path itself (traversal, SQLi, CMS and
+        # webshell shapes get inert decoy pages). It owns the whole port, so it
+        # comes before the stage and probe handlers.
+        if persona.respond is not None:
+            body = request["body"]
+            reply = persona.respond(
+                request.method, request.path, request.query_string or "",
+                request.headers.get("Content-Type", ""),
+                body.text() if body is not None else "",
+                self._decoy_key,
+            )
+            request["resource_kind"] = f"webapp:{reply.kind}"
+            self.emit(
+                request, eventlog.EVENT_HUNT, ip=request["ip"], method=request.method,
+                path=request.path, query=request.query_string or None,
+                family=persona.name, target="PHP web application",
+                category=personas.webapp.CATEGORY_WEBAPP, intent=reply.intent,
+                web_attack=reply.kind, mitre=list(reply.mitre),
+                ua=fp.user_agent[:400], claimed_crawler=fp.claimed_crawler, ja4=request["ja4"],
+                body_sha256=capture.body_fields(body, 0).get("body_sha256") if body is not None else None,
+                indicators=(request["findings"].as_dict() if request["findings"].any() else None),
+                decoy_served=self.config.hunt_decoys,
+            )
+            return web.Response(
+                status=reply.status, text=reply.body,
+                content_type=reply.content_type, charset="utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
 
         # A multi-stage workflow step wins over the static probe decoy, so the
         # attacker gets a consistent world (submit -> poll, create -> inspect).

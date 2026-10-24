@@ -18,12 +18,17 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .. import hunt
-from . import stages
+from . import stages, webapp
 from .stages import Stage
+from .webapp import Reply
 
 # A stage handler sees (method, path, client_ip, id_key) and returns a Stage
 # when it recognises a step of its service's workflow.
 StageFn = Callable[[str, str, str, bytes], "Stage | None"]
+
+# A web-app responder sees the full request shape and always returns a page:
+# a web server answers every path with *something*.
+RespondFn = Callable[[str, str, str, str, str, bytes], "Reply"]
 
 
 @dataclass(frozen=True)
@@ -35,9 +40,16 @@ class Persona:
     # service answers *something* on its own port, so silence is itself a tell.
     default_decoy: str | None = None
     default_content_type: str = "application/json"
+    # Extra response headers a scanner expects from this service (e.g. a PHP
+    # site's X-Powered-By). Applied to every response on this persona's port.
+    extra_headers: tuple[tuple[str, str], ...] = ()
     # Multi-stage workflow handler (Ray job -> status, Docker create -> start
     # -> inspect). Tried before the static probe decoys.
     stage: StageFn | None = None
+    # A web-app face: answers every request with an inert, plausible page and
+    # tags the attack shape. Tried after the stage handler. A persona with a
+    # responder owns the whole port (its `families` are empty).
+    respond: RespondFn | None = None
 
     def match(self, path: str) -> hunt.Probe | None:
         """First probe of one of this persona's families that matches `path`.
@@ -58,6 +70,7 @@ DEFAULT_PORTS: dict[str, int] = {
     "ray": 8265,
     "docker": 2375,
     "jupyter": 8888,
+    "php": 8080,
 }
 
 _OLLAMA_404 = '{"error":"model not found, try pulling it first"}'
@@ -81,6 +94,15 @@ PERSONAS: dict[str, Persona] = {
     "jupyter": Persona(
         "jupyter", frozenset({"jupyter"}),
         server_header="TornadoServer/6.3.3",
+    ),
+    # A PHP/WordPress site that looks unpatched and exploitable. Owns its whole
+    # port via the responder; nothing is executed (see webapp.py).
+    "php": Persona(
+        "php", frozenset(),
+        server_header="Apache/2.4.57 (Debian)",
+        extra_headers=(("X-Powered-By", "PHP/8.1.27"),),
+        default_content_type="text/html",
+        respond=webapp.respond,
     ),
 }
 
