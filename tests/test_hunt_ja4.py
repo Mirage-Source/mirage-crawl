@@ -174,8 +174,37 @@ def test_request_rewriter() -> None:
     )
     rewriter, out, count = feed([chunked])
     check("chunked head still injected", count == 1)
-    check("chunked switches to passthrough", rewriter.state == RequestRewriter.PASSTHROUGH)
     check("chunked body preserved", b"5\r\nhello\r\n0\r\n\r\n" in out)
+    check("chunked request ends back in head state", rewriter.state == RequestRewriter.HEAD, rewriter.state)
+
+    _, out, count = feed([chunked + get_b])
+    check("request after a chunked one is still injected", count == 2, str(count))
+    check("pipelined bytes all preserved", out.count(b"hello") == 1 and b"GET /b" in out)
+
+    stream = chunked + get_b
+    _, out, count = feed([stream[i:i + 1] for i in range(len(stream))])
+    check("chunked framing survives byte-at-a-time delivery", count == 2, str(count))
+
+    fancy = (
+        b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"
+        # a 4-byte chunk whose data is itself CRLF CRLF
+        b"A;name=val\r\n0123456789\r\n4\r\n\r\n\r\n\r\n0\r\nX-Trailer: 1\r\n\r\n"
+    )
+    _, out, count = feed([fancy + get_b])
+    check("extensions, CRLF-looking data and trailers handled", count == 2, str(count))
+    check("trailer forwarded intact", b"X-Trailer: 1\r\n\r\n" in out)
+
+    smuggle = (
+        b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"0\r\n\r\n"
+    )
+    _, _, count = feed([smuggle + get_b])
+    check("Transfer-Encoding wins over Content-Length", count == 2, str(count))
+
+    garbage = b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"
+    rewriter, out, _ = feed([garbage + get_b])
+    check("unparseable chunk size falls back to passthrough",
+          rewriter.state == RequestRewriter.PASSTHROUGH and out.endswith(get_b))
 
 
 if __name__ == "__main__":

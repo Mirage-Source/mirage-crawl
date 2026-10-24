@@ -60,24 +60,56 @@ def inject_headers(head: bytes, ja4: str | None, client_ip: str, ja4_header: str
     return head[:split] + b"\r\n" + b"\r\n".join(additions) + head[split:]
 
 
+LINE_LIMIT = 8 * 1024  # a chunk-size or trailer line longer than this is not real
+
+
+def _body_framing(head: bytes) -> tuple[str, int]:
+    """("chunked", 0) | ("length", n) | ("none", 0) | ("unknown", 0) for a request head.
+
+    Transfer-Encoding beats Content-Length (RFC 9112 6.3), and chunked must be
+    the final coding. Anything else is framing we cannot follow.
+    """
+    te: list[bytes] = []
+    lengths: list[bytes] = []
+    for line in head.split(b"\r\n")[1:]:
+        name, sep, value = line.partition(b":")
+        if not sep:
+            continue
+        name = name.strip().lower()
+        if name == b"transfer-encoding":
+            te.extend(v.strip().lower() for v in value.split(b","))
+        elif name == b"content-length":
+            lengths.append(value.strip())
+    if te:
+        return ("chunked", 0) if te[-1] == b"chunked" else ("unknown", 0)
+    if not lengths:
+        return "none", 0
+    if len(set(lengths)) != 1 or not lengths[0].isdigit():
+        return "unknown", 0
+    return "length", int(lengths[0])
+
+
 class RequestRewriter:
     """Injects our headers into every request on a connection, not just the first.
 
     A keep-alive connection carries many requests. Rewriting only the first
     would leave every later one without a JA4 and without the real client
-    address — and since the sensor falls back to the socket peer when
+    address, and since the sensor falls back to the socket peer when
     X-Forwarded-For is absent, those requests would be silently attributed to
-    127.0.0.1. Quietly wrong data is worse than missing data, so the stream is
-    split on request boundaries and each head is rewritten.
+    the front itself. Quietly wrong data is worse than missing data, so the
+    stream is split on request boundaries and each head is rewritten.
 
-    Bodies are followed by Content-Length. A chunked request switches the
-    connection to pass-through, because tracking chunk framing to re-find the
-    next head is more machinery than bot traffic justifies; such requests keep
-    working, they just do not get a fingerprint.
+    Bodies are followed by Content-Length or by chunked framing (sizes,
+    extensions, the terminal chunk, trailers). Only framing that cannot be
+    parsed switches the connection to pass-through.
     """
 
     HEAD = "head"
     BODY = "body"
+    CHUNK_SIZE = "chunk_size"
+    CHUNK_DATA = "chunk_data"
+    CHUNK_END = "chunk_end"  # the CRLF after a chunk's data
+    TRAILERS = "trailers"
     PASSTHROUGH = "passthrough"
 
     def __init__(self, ja4: str | None, client_ip: str, ja4_header: str) -> None:
@@ -88,53 +120,99 @@ class RequestRewriter:
         self.buffer = b""
         self.remaining = 0
 
+    def _line(self) -> bytes | None:
+        """Pop one CRLF-terminated line (without the CRLF), or None if incomplete."""
+        end = self.buffer.find(b"\r\n")
+        if end < 0:
+            if len(self.buffer) > LINE_LIMIT:
+                self.state = self.PASSTHROUGH
+            return None
+        line, self.buffer = self.buffer[:end], self.buffer[end + 2:]
+        return line
+
     def feed(self, data: bytes) -> bytes:
         self.buffer += data
-        out = b""
+        out = bytearray()
 
         while self.buffer:
             if self.state == self.PASSTHROUGH:
                 out += self.buffer
                 self.buffer = b""
 
-            elif self.state == self.BODY:
+            elif self.state in (self.BODY, self.CHUNK_DATA):
                 take = min(self.remaining, len(self.buffer))
                 out += self.buffer[:take]
                 self.buffer = self.buffer[take:]
                 self.remaining -= take
                 if self.remaining == 0:
+                    self.state = self.HEAD if self.state == self.BODY else self.CHUNK_END
+
+            elif self.state == self.CHUNK_END:
+                if len(self.buffer) < 2:
+                    break
+                if self.buffer[:2] != b"\r\n":
+                    self.state = self.PASSTHROUGH
+                    continue
+                out += b"\r\n"
+                self.buffer = self.buffer[2:]
+                self.state = self.CHUNK_SIZE
+
+            elif self.state == self.CHUNK_SIZE:
+                line = self._line()
+                if line is None:
+                    if self.state == self.PASSTHROUGH:
+                        continue
+                    break
+                size_text = line.split(b";", 1)[0].strip()
+                try:
+                    size = int(size_text, 16) if size_text else -1
+                except ValueError:
+                    size = -1
+                if size < 0:
+                    out += line + b"\r\n"
+                    self.state = self.PASSTHROUGH
+                    continue
+                out += line + b"\r\n"
+                if size == 0:
+                    self.state = self.TRAILERS
+                else:
+                    self.remaining = size
+                    self.state = self.CHUNK_DATA
+
+            elif self.state == self.TRAILERS:
+                line = self._line()
+                if line is None:
+                    if self.state == self.PASSTHROUGH:
+                        continue
+                    break
+                out += line + b"\r\n"
+                if not line:
                     self.state = self.HEAD
 
             else:
                 end = self.buffer.find(b"\r\n\r\n")
                 if end < 0:
                     if len(self.buffer) > HEAD_LIMIT:
-                        out += self.buffer
-                        self.buffer = b""
                         self.state = self.PASSTHROUGH
+                        continue
                     break
 
-                head, rest = self.buffer[:end], self.buffer[end:]
+                head, self.buffer = self.buffer[:end], self.buffer[end + 4:]
                 out += inject_headers(head, self.ja4, self.client_ip, self.ja4_header)
                 out += b"\r\n\r\n"
-                self.buffer = rest[4:]
 
-                lowered = head.lower()
-                if b"\r\ntransfer-encoding:" in lowered:
+                framing, length = _body_framing(head)
+                if framing == "chunked":
+                    self.state = self.CHUNK_SIZE
+                elif framing == "length" and length > 0:
+                    self.remaining = length
+                    self.state = self.BODY
+                elif framing == "unknown":
                     self.state = self.PASSTHROUGH
-                    continue
+                else:
+                    self.state = self.HEAD
 
-                self.remaining = 0
-                for line in head.split(b"\r\n")[1:]:
-                    if line.lower().startswith(b"content-length:"):
-                        try:
-                            self.remaining = int(line.split(b":", 1)[1].strip())
-                        except ValueError:
-                            self.remaining = 0
-                        break
-                self.state = self.BODY if self.remaining > 0 else self.HEAD
-
-        return out
+        return bytes(out)
 
 
 class Front:
