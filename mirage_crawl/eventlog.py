@@ -28,6 +28,7 @@ EVENT_TRAP_HIT = "trap_hit"
 EVENT_IDENTITY = "identity"
 EVENT_HUNT = "hunt"
 EVENT_TLS = "tls"
+EVENT_CREDENTIAL = "credential"
 EVENT_SENSOR = "sensor"
 
 

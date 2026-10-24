@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from . import beacons, capture, eventlog, hunt, policies
+from . import beacons, capture, credentials, eventlog, hunt, policies
 from .config import Config
 from .fingerprint import build as build_fingerprint
 from .identity import RangeTable, VerifierCache
@@ -299,6 +299,22 @@ class Sensor:
             indicator_locations=indicator_locations or None,
             **capture.body_fields(request["body"], self.config.body_log_bytes),
         )
+
+        # Which face the credential was tried against. A hunt probe's family
+        # until per-port personas exist; "site" for the documentation site.
+        probe = hunt.match(request.path)
+        persona = request.get("persona") or (probe.family if probe else "site")
+        for cred in credentials.extract(headers, raw_query, request["body"]):
+            self.emit(
+                request,
+                eventlog.EVENT_CREDENTIAL,
+                ip=ip,
+                path=raw_path,
+                method=request.method,
+                persona=persona,
+                ua=ua[:400],
+                **cred.as_dict(),
+            )
 
         self._schedule_identity(ip, fp)
         return response

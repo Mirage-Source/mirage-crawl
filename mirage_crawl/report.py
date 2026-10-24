@@ -169,6 +169,27 @@ def main(argv: list[str] | None = None) -> int:
         if techniques:
             print(f"\n    MITRE: {', '.join(techniques)}")
 
+    creds = [e for e in events if e.get("kind") == eventlog.EVENT_CREDENTIAL]
+    if creds:
+        print("\n" + "-" * 74)
+        print("CREDENTIALS TRIED")
+        print("-" * 74)
+        print(f"  {len(creds)} attempts from {len({e.get('ip') for e in creds})} address(es)")
+        for persona, count in Counter(e.get("persona") for e in creds).most_common(8):
+            print(f"    {persona or '-':18s} {count}")
+        print("\n  top pairs")
+        pairs = Counter((e.get("scheme"), e.get("user"), e.get("password")) for e in creds)
+        for (scheme, user, password), count in pairs.most_common(10):
+            print(f"    {count:5d}  {scheme:8s} {(user or '-')[:24]:26s} {(password or '-')[:30]}")
+
+    exploited = Counter(x for p in profiles.values() for x in p.exploits)
+    if exploited:
+        print("\n" + "-" * 74)
+        print("EXPLOIT ATTEMPTS  (seen in any header, path, query or body)")
+        print("-" * 74)
+        for name, count in exploited.most_common():
+            print(f"  {name:18s} {count} client(s)")
+
     ja4s = Counter(j for p in profiles.values() for j in p.ja4)
     if ja4s:
         print("\n" + "-" * 74)

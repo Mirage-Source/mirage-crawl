@@ -92,6 +92,7 @@ class Profile:
     mitre: set[str] = field(default_factory=set)
     # Exploit attempts seen anywhere in this client's requests.
     exploits: set[str] = field(default_factory=set)
+    credential_attempts: int = 0
 
     _paths_seen: dict[str, int] = field(default_factory=lambda: defaultdict(int), repr=False)
     _hashes_seen: dict[str, int] = field(default_factory=lambda: defaultdict(int), repr=False)
@@ -158,6 +159,7 @@ class Profile:
             "miners": sorted(self.miners),
             "mitre": sorted(self.mitre),
             "exploits": sorted(self.exploits),
+            "credential_attempts": self.credential_attempts,
         }
 
 
@@ -289,6 +291,10 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             if event.get("ja4"):
                 p.ja4.add(event["ja4"])
 
+
+        elif kind == eventlog.EVENT_CREDENTIAL:
+            p = profile_for(ua, claimed)
+            p.credential_attempts += 1
 
         elif kind == eventlog.EVENT_IDENTITY:
             p = profile_for(ua, event.get("claimed"))
