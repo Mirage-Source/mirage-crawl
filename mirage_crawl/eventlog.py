@@ -16,6 +16,7 @@ OOM-killed sensor is not.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import os
 from datetime import datetime, timezone
@@ -117,15 +118,30 @@ class EventLog:
             self.dropped += 1
 
 
+def _day_key(path: Path) -> tuple[str, str]:
+    # Sort by the day in the name; .stem drops only the last suffix, so a
+    # rotated "2026-01-02.jsonl.gz" stems to "2026-01-02.jsonl" -- take the day
+    # from whichever stem ends in a date.
+    name = path.name
+    for stem in (path.stem, Path(path.stem).stem):
+        if len(stem) >= 10 and stem[-10:].count("-") == 2:
+            return (stem[-10:], name)
+    return (name, name)
+
+
 def read_events(directory: str | Path, kinds: set[str] | None = None):
     """Iterate every logged event, oldest day first. Skips malformed lines.
 
     Files sort by the day in their name, so tls-2026-01-02 comes after
-    2026-01-01 rather than after every unprefixed file.
+    2026-01-01 rather than after every unprefixed file. Gzip-rotated files
+    (``*.jsonl.gz``, produced by scripts/rotate_logs.py) are read transparently,
+    so analysis keeps working after rotation.
     """
     directory = Path(directory)
-    for path in sorted(directory.glob("*.jsonl"), key=lambda p: (p.stem[-10:], p.stem)):
-        with open(path, "r", encoding="utf-8") as handle:
+    paths = sorted(directory.glob("*.jsonl*"), key=_day_key)
+    for path in paths:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
