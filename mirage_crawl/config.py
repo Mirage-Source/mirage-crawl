@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,25 +90,50 @@ class Config:
         """Load or create the beacon signing key.
 
         The key must be stable across restarts or every token minted before the
-        restart stops verifying, silently discarding trap hits. It is generated
-        once and persisted with owner-only permissions.
-        """
-        path = self.secret_file
-        path.parent.mkdir(parents=True, exist_ok=True)
+        restart stops verifying, silently discarding trap hits. So this never
+        regenerates an existing file: a file that exists but cannot be read as
+        a key is an error the operator has to look at, not something to paper
+        over with a fresh key.
 
+        Format: new keys are 64 hex characters (a trailing newline is allowed,
+        so `echo`-written keys work). Anything else of 32+ bytes is a legacy
+        raw key and is used byte-for-byte -- no stripping, because a random
+        key can legitimately end in a whitespace byte.
+        """
         env_secret = os.environ.get("CRAWL_BEACON_SECRET")
         if env_secret:
             return hashlib.blake2b(env_secret.encode("utf-8"), digest_size=32).digest()
 
-        if path.exists():
-            raw = path.read_bytes().strip()
-            if len(raw) >= 32:
-                return raw
+        path = self.secret_file
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-        raw = secrets.token_bytes(32)
-        path.write_bytes(raw)
+        if path.exists():
+            return _parse_secret(path.read_bytes(), path)
+
+        key = secrets.token_bytes(32)
+        # O_EXCL: if another process created the file between our exists()
+        # check and now, fail rather than overwrite whatever it wrote.
         try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return _parse_secret(path.read_bytes(), path)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(key.hex() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return key
+
+
+_HEX_KEY_RE = re.compile(rb"^[0-9a-fA-F]{64}(\r?\n)?$")
+
+
+def _parse_secret(raw: bytes, path: Path) -> bytes:
+    if _HEX_KEY_RE.match(raw):
+        return bytes.fromhex(raw.decode("ascii").strip())
+    if len(raw) >= 32:
         return raw
+    raise ValueError(
+        f"{path} exists but is not a usable beacon key ({len(raw)} bytes). "
+        "Refusing to replace it: every token minted under the old key would stop "
+        "verifying. Restore the original file, or delete it deliberately."
+    )

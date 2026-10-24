@@ -8,12 +8,15 @@ have to be driven directly.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mirage_crawl import beacons, policies  # noqa: E402
+from mirage_crawl.config import Config  # noqa: E402
 from mirage_crawl.classify import (  # noqa: E402
     STATE_COMPLIANT, STATE_DEFIANT, STATE_IGNORANT, STATE_MINER, Profile,
 )
@@ -25,8 +28,6 @@ from mirage_crawl.identity import (  # noqa: E402
 from mirage_crawl.sitegen import Site  # noqa: E402
 
 failures: list[str] = []
-
-
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -60,6 +61,48 @@ def test_beacons() -> None:
         len(beacons.mint(secret, s, f"10.0.0.{i}", "ua")) == beacons.TOKEN_CHARS
         for i, s in enumerate(list(beacons.STANDARD_CODES)[:20])
     ))
+
+
+def test_secret_loading() -> None:
+    print("\nbeacon secret persistence")
+    os.environ.pop("CRAWL_BEACON_SECRET", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        # A fresh key must reload byte-identical every time. The old loader
+        # stripped whitespace bytes off a raw key, failed its own length check
+        # on ~5% of keys, and silently regenerated (and overwrote) the file.
+        unstable = 0
+        for i in range(2000):
+            cfg = Config(secret_file=Path(tmp) / f"k{i}")
+            first = cfg.load_secret()
+            if cfg.load_secret() != first or len(first) != 32:
+                unstable += 1
+        check("2000 fresh keys all reload identically", unstable == 0, f"{unstable} changed")
+
+        cfg = Config(secret_file=Path(tmp) / "fmt")
+        key = cfg.load_secret()
+        text = cfg.secret_file.read_text()
+        check("new keys are written as 64-char hex", text.strip() == key.hex() and len(key.hex()) == 64)
+        check("key file is owner-only", (cfg.secret_file.stat().st_mode & 0o077) == 0)
+
+        raw = os.urandom(31) + b"\n"
+        legacy = Path(tmp) / "legacy"
+        legacy.write_bytes(raw)
+        check("legacy raw key ending in newline survives", Config(secret_file=legacy).load_secret() == raw)
+        check("legacy file left untouched", legacy.read_bytes() == raw)
+
+        hexfile = Path(tmp) / "hand"
+        hexfile.write_text(("ab" * 32) + "\n")
+        check("hand-written hex with trailing newline loads as hex",
+              Config(secret_file=hexfile).load_secret() == bytes.fromhex("ab" * 32))
+
+        bad = Path(tmp) / "bad"
+        bad.write_bytes(b"short")
+        try:
+            Config(secret_file=bad).load_secret()
+            check("invalid key file raises", False)
+        except ValueError:
+            check("invalid key file raises", True)
+        check("invalid key file is never overwritten", bad.read_bytes() == b"short")
 
 
 def test_site() -> None:
@@ -183,6 +226,7 @@ def test_policies() -> None:
 
 if __name__ == "__main__":
     test_beacons()
+    test_secret_loading()
     test_site()
     test_fingerprint()
     test_identity()
