@@ -55,6 +55,36 @@ LISTENER_FRONT = "front"
 LISTENER_PROXY = "proxy"
 LISTENER_ADMIN = "admin"
 
+# The two faces served on the general-purpose listeners (public/front/proxy).
+# Per-service persona ports are a third kind of face, named for the persona.
+FACE_DOCS = "docs"
+FACE_ATTACK = "attack"
+
+# Listener roles that are plumbing, not a persona.
+_BASE_ROLES = {LISTENER_PUBLIC, LISTENER_FRONT, LISTENER_PROXY, LISTENER_ADMIN}
+
+
+def _strip_port(host: str) -> str:
+    """The hostname from a Host header, without the port.
+
+    IPv6 literals are bracketed ("[::1]:80"); an unbracketed colon is a port.
+    """
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host[1 : host.find("]")] if "]" in host else host
+    return host.split(":", 1)[0] if ":" in host else host
+
+
+def choose_face(host_header: str, docs_hosts: frozenset[str] | set[str]) -> str:
+    """docs if the client asked for the site by its name, else attack.
+
+    Crawlers arrive via DNS and links, so they send the real hostname.
+    Scanners sweep address space and send the bare IP, a wrong name, or no
+    Host at all. That split is the face: the documentation site answers to
+    its name; everything else meets the attack face.
+    """
+    return FACE_DOCS if _strip_port(host_header) in docs_hosts else FACE_ATTACK
+
 
 def _sock_key(sockname) -> tuple | None:
     """Normalise a socket name so a connection can be matched to its listener."""
@@ -131,6 +161,12 @@ class Sensor:
         self._own_host = urlsplit(config.origin).hostname
         self.proxy_address: tuple | None = None
 
+        # Hostnames that get the docs face: the origin's host plus any extras.
+        hosts = {h.strip().lower() for h in config.site_hosts.split(",") if h.strip()}
+        if self._own_host:
+            hosts.add(self._own_host.lower())
+        self.docs_hosts = frozenset(hosts)
+
     # -- helpers -----------------------------------------------------------
 
     def listener_of(self, request: web.Request) -> str:
@@ -139,6 +175,13 @@ class Sensor:
         sockname = transport.get_extra_info("sockname") if transport is not None else None
         key = _sock_key(sockname)
         return self.listeners.get(key, LISTENER_PUBLIC) if key else LISTENER_PUBLIC
+
+    def face_of(self, request: web.Request, listener: str) -> str:
+        """Which face serves this request: a persona port names its persona;
+        otherwise the Host header decides docs vs attack."""
+        if listener not in _BASE_ROLES:
+            return listener  # a persona port is its own face
+        return choose_face(request.headers.get("Host", ""), self.docs_hosts)
 
     def client_identity(self, request: web.Request, listener: str) -> tuple[str, str | None]:
         """(client ip, ja4) as far as this listener is entitled to say."""
@@ -178,7 +221,9 @@ class Sensor:
         return token
 
     def emit(self, request: web.Request, kind: str, **fields) -> None:
-        """Log an event tied to this request, so all of a request's events join on rid."""
+        """Log an event tied to this request: all of a request's events share
+        its rid and face, so per-face analysis needs no join."""
+        fields.setdefault("face", request.get("face"))
         self.log.emit(kind, rid=request.get("rid"), **fields)
 
     def trap(self, standard: str, ip: str, ua: str) -> str:
@@ -260,6 +305,7 @@ class Sensor:
         request["ip"] = ip
         request["ja4"] = ja4
         request["listener"] = listener
+        request["face"] = self.face_of(request, listener)
 
         try:
             response = await handler(request)
@@ -305,6 +351,7 @@ class Sensor:
             signals=list(fp.signals),
             ja4=ja4,
             listener=listener,
+            face=request["face"],
             resource=request.get("resource_kind"),
             content_hash=request.get("content_hash"),
             fork_of=request.get("fork_of"),

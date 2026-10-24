@@ -186,6 +186,20 @@ def test_fingerprint() -> None:
     check("order is preserved, not sorted", real.header_order[1] == "sec-ch-ua")
 
 
+def test_face_routing() -> None:
+    print("\nface routing")
+    from mirage_crawl.server import choose_face, FACE_DOCS, FACE_ATTACK
+    docs = frozenset({"docs.example.org"})
+    check("named host gets the docs face", choose_face("docs.example.org", docs) == FACE_DOCS)
+    check("host with a port still matches", choose_face("docs.example.org:443", docs) == FACE_DOCS)
+    check("match is case-insensitive", choose_face("Docs.Example.ORG", docs) == FACE_DOCS)
+    check("bare IPv4 gets the attack face", choose_face("203.0.113.9", docs) == FACE_ATTACK)
+    check("IPv4 with port gets the attack face", choose_face("203.0.113.9:80", docs) == FACE_ATTACK)
+    check("bracketed IPv6 literal is not the site name", choose_face("[2001:db8::1]:80", docs) == FACE_ATTACK)
+    check("wrong name gets the attack face", choose_face("login.evil.test", docs) == FACE_ATTACK)
+    check("missing Host gets the attack face", choose_face("", docs) == FACE_ATTACK)
+
+
 def test_identity() -> None:
     print("\nidentity verification")
     ranges = RangeTable()
@@ -383,6 +397,7 @@ if __name__ == "__main__":
     test_site()
     test_canary_disguise()
     test_fingerprint()
+    test_face_routing()
     test_identity()
     test_states()
     test_standard_kinds()

@@ -83,6 +83,11 @@ class Config:
     # Header carrying the JA4 fingerprint, injected by the TLS front.
     ja4_header: str = "X-Mirage-JA4"
 
+    # Hostnames the documentation face answers to. Empty means "derive from
+    # the origin": a request whose Host matches gets the docs site, anything
+    # else (bare IP, wrong name, no Host) gets the attack face.
+    site_hosts: str = ""
+
     # Server header sent on every response. aiohttp's default announces the
     # Python/aiohttp stack, which is a honeypot tell; a plain, common value
     # hides it. Per-persona overrides come later (a PHP persona wants a
@@ -115,6 +120,7 @@ class Config:
             body_log_bytes=_int("CRAWL_BODY_LOG_BYTES", 16_384),
             ja4_header=os.environ.get("CRAWL_JA4_HEADER", "X-Mirage-JA4"),
             server_header=os.environ.get("CRAWL_SERVER_HEADER", "nginx"),
+            site_hosts=os.environ.get("CRAWL_SITE_HOSTS", ""),
         )
         if not cfg.origin:
             cfg.origin = f"http://localhost:{cfg.port}"

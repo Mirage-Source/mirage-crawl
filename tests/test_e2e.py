@@ -64,6 +64,7 @@ async def run() -> int:
             port=0,
             sensor_id="test-sensor",
             origin="http://test.invalid",
+            site_hosts="docs.test.invalid",
             log_dir=tmp / "events",
             secret_file=tmp / "beacon.secret",
             ranges_file=Path("config/crawler_ranges.json"),
@@ -261,6 +262,16 @@ async def run() -> int:
         check("no honeypot tell in served page bodies", not leaked, str(leaked))
         check("canary still present as a revision string",
               "Document revision" in a_page and "Document revision" in liar_body)
+
+        print("\nface routing")
+        faces = {f for r in requests for f in [r.get("face")]}
+        check("requests carry a face", faces == {"docs", "attack"}, str(faces))
+        docs_hosted = [r for r in requests if r["face"] == "docs"]
+        check("named-host requests are the docs face",
+              bool(docs_hosted) and all(r["host"] == "docs.test.invalid" for r in docs_hosted))
+        forger_face = [r["face"] for r in requests if r["ua"] == UA_FORGER]
+        check("bare-IP forger hits the attack face",
+              forger_face and all(f == "attack" for f in forger_face), str(forger_face))
 
         print("\nmisc")
         check("unknown path 404s", st_404 == 404, f"got {st_404}")
