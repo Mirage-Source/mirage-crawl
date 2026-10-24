@@ -20,6 +20,7 @@ Three things are measured that a plain access log cannot give you:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import secrets
 import socket
@@ -161,6 +162,10 @@ class Sensor:
         self._own_host = urlsplit(config.origin).hostname
         self.proxy_address: tuple | None = None
         self.persona_addresses: dict[str, tuple] = {}
+        # Key for deriving decoy identifiers (job/container ids). Separate
+        # domain from the beacon MAC so a leaked decoy id reveals nothing
+        # about the signing key.
+        self._decoy_key = hashlib.blake2b(self.secret, person=b"decoy-id", digest_size=32).digest()
 
         # Hostnames that get the docs face: the origin's host plus any extras.
         hosts = {h.strip().lower() for h in config.site_hosts.split(",") if h.strip()}
@@ -690,11 +695,33 @@ class Sensor:
         service answers something on its own port rather than going silent.
         """
         request["server_header"] = persona.server_header
+        fp = request["fp"]
+
+        # A multi-stage workflow step wins over the static probe decoy, so the
+        # attacker gets a consistent world (submit -> poll, create -> inspect).
+        if persona.stage is not None:
+            stage = persona.stage(request.method, request.path, request["ip"], self._decoy_key)
+            if stage is not None and self.config.hunt_decoys:
+                request["resource_kind"] = f"hunt:{stage.family}"
+                self.emit(
+                    request, eventlog.EVENT_HUNT, ip=request["ip"], method=request.method,
+                    path=request.path, query=request.query_string or None,
+                    family=stage.family, target=stage.target, category=stage.category,
+                    intent=stage.intent, mitre=["T1610", "T1496"],
+                    ua=fp.user_agent[:400], claimed_crawler=fp.claimed_crawler, ja4=request["ja4"],
+                    body_sha256=capture.body_fields(request["body"], 0).get("body_sha256"),
+                    indicators=(request["findings"].as_dict() if request["findings"].any() else None),
+                    decoy_served=True, stage=True,
+                )
+                return web.Response(
+                    status=stage.status, body=stage.body.encode(),
+                    content_type=stage.content_type, headers={"Cache-Control": "no-store"},
+                )
+
         probe = persona.match(request.path)
         if probe is not None:
             return await self.hunt_probe(request, probe)
 
-        fp = request["fp"]
         request["resource_kind"] = f"persona:{persona.name}"
         served = persona.default_decoy is not None and self.config.hunt_decoys
         self.emit(

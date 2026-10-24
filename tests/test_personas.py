@@ -47,8 +47,30 @@ def test_parse_and_match() -> None:
     check("docker owns the registry catalog", personas.get("docker").match("/v2/_catalog").family == "registry")
 
 
+def test_stage_determinism() -> None:
+    print("\nmulti-stage decoys (unit)")
+    from mirage_crawl.personas import stages
+    a = stages.ray("POST", "/api/jobs/", "9.9.9.9", b"key")
+    b = stages.ray("POST", "/api/jobs/", "9.9.9.9", b"key")
+    c = stages.ray("POST", "/api/jobs/", "8.8.8.8", b"key")
+    check("same client, same job id", a.body == b.body)
+    check("different client, different job id", a.body != c.body)
+    check("ray poll reports RUNNING", "RUNNING" in stages.ray("GET", "/api/jobs/raysubmit_x", "9.9.9.9", b"k").body)
+    check("ray ignores unrelated paths", stages.ray("GET", "/api/version", "9.9.9.9", b"k") is None)
+    create = stages.docker("POST", "/v1.43/containers/create", "9.9.9.9", b"k")
+    check("docker create returns 201 with an Id", create.status == 201 and '"Id"' in create.body)
+    check("docker start returns 204 empty", stages.docker("POST", "/v1.43/containers/abc/start", "9.9.9.9", b"k").status == 204)
+    check("docker inspect reports running",
+          '"running"' in stages.docker("GET", "/v1.43/containers/abc/json", "9.9.9.9", b"k").body)
+
+
 async def get(session, url, **kw):
     async with session.get(url, **kw) as resp:
+        return resp.status, resp.headers, await resp.text()
+
+
+async def post(session, url, data=b"", **kw):
+    async with session.post(url, data=data, **kw) as resp:
         return resp.status, resp.headers, await resp.text()
 
 
@@ -82,6 +104,12 @@ async def test_live() -> None:
             pub_status, _, _ = await get(s, f"http://127.0.0.1:{public_port}/robots.txt",
                                          headers={"Host": "docs.test.invalid"})
 
+            # Walk the Ray job chain across the port and confirm it is consistent.
+            _, _, submit = await post(s, f"http://127.0.0.1:{ray_port}/api/jobs/",
+                                      data=b'{"entrypoint":"python -c \\"x\\""}')
+            job_id = json.loads(submit)["job_id"]
+            poll_status, _, poll = await get(s, f"http://127.0.0.1:{ray_port}/api/jobs/{job_id}")
+
         await runner.cleanup()
         events = list(eventlog.read_events(cfg.log_dir))
         hunts = [e for e in events if e["kind"] == eventlog.EVENT_HUNT]
@@ -102,12 +130,21 @@ async def test_live() -> None:
               {e["family"] for e in version_hunts} == {"ollama", "ray"},
               str([(e["family"], e.get("face")) for e in version_hunts]))
         check("persona name is the face", all(e["face"] == e["family"] for e in version_hunts))
+
+        print("\nmulti-stage decoys (live)")
+        check("ray job submit returns a handle", job_id.startswith("raysubmit_"))
+        check("polling that handle reports it running",
+              poll_status == 200 and json.loads(poll)["status"] == "RUNNING" and json.loads(poll)["job_id"] == job_id)
+        staged = [e for e in hunts if e.get("stage")]
+        check("staged hunt events are flagged and attributed to ray",
+              len(staged) == 2 and all(e["family"] == "ray" for e in staged), str(len(staged)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
     test_parse_and_match()
+    test_stage_determinism()
     asyncio.run(test_live())
     print("\nFAILURES: " + ", ".join(failures) if failures else "\nall persona checks passed")
     sys.exit(1 if failures else 0)

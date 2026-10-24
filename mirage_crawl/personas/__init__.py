@@ -14,9 +14,16 @@ decoys (3.3) and the PHP web-app face (3.4) build on this.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Callable
 
 from .. import hunt
+from . import stages
+from .stages import Stage
+
+# A stage handler sees (method, path, client_ip, id_key) and returns a Stage
+# when it recognises a step of its service's workflow.
+StageFn = Callable[[str, str, str, bytes], "Stage | None"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,9 @@ class Persona:
     # service answers *something* on its own port, so silence is itself a tell.
     default_decoy: str | None = None
     default_content_type: str = "application/json"
+    # Multi-stage workflow handler (Ray job -> status, Docker create -> start
+    # -> inspect). Tried before the static probe decoys.
+    stage: StageFn | None = None
 
     def match(self, path: str) -> hunt.Probe | None:
         """First probe of one of this persona's families that matches `path`.
@@ -61,10 +71,12 @@ PERSONAS: dict[str, Persona] = {
     "ray": Persona(
         "ray", frozenset({"ray"}),
         server_header="Werkzeug/2.3.7 Python/3.10.12",
+        stage=stages.ray,
     ),
     "docker": Persona(
         "docker", frozenset({"docker", "registry"}),
         server_header="Docker/24.0.7 (linux)", default_decoy=_DOCKER_404,
+        stage=stages.docker,
     ),
     "jupyter": Persona(
         "jupyter", frozenset({"jupyter"}),
