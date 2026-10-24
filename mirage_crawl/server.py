@@ -219,8 +219,10 @@ class Sensor:
     async def policy_file(self, request: web.Request) -> web.Response:
         policy = policies.BY_PATH[request.path]
         ip, fp = request["ip"], request["fp"]
-        token = self.mint(policy.standard, ip, fp.user_agent)
-        body = policy.render(policies.trap_path(policy.standard, token), self.config.origin)
+        body, tokens = policies.render_with(
+            policy, lambda std: self.mint(std, ip, fp.user_agent), self.config.origin
+        )
+        token = tokens.pop(policy.standard)
 
         request["resource_kind"] = "policy"
         self.log.emit(
@@ -229,6 +231,7 @@ class Sensor:
             standard=policy.standard,
             path=policy.path,
             token=token,
+            extra_tokens=tokens or None,
             ua=fp.user_agent[:400],
             claimed_crawler=fp.claimed_crawler,
         )
@@ -400,7 +403,7 @@ class Sensor:
                 split_fleet=not same_ip,
                 ua=fp.user_agent[:400],
                 claimed_crawler=fp.claimed_crawler,
-                disallowed=policies.disallowed(path),
+                disallowed=policies.disallowed(path, fp.user_agent),
             )
             request["resource_kind"] = f"trap:{beacon.standard}"
             body = (
@@ -436,7 +439,7 @@ class Sensor:
                 split_fleet=None,
                 ua=fp.user_agent[:400],
                 claimed_crawler=fp.claimed_crawler,
-                disallowed=policies.disallowed(path),
+                disallowed=policies.disallowed(path, fp.user_agent),
             )
             request["resource_kind"] = kind
             return web.Response(

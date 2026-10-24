@@ -201,7 +201,8 @@ def test_states() -> None:
     print("\ncompliance state machine")
     compliant = Profile("ua", None, standards_read={"robots"})
     ignorant = Profile("ua", None, disallowed_paths={"/internal/x"})
-    defiant = Profile("ua", None, standards_read={"robots"}, disallowed_paths={"/internal/x"})
+    defiant = Profile("ua", None, standards_read={"robots"}, disallowed_paths={"/internal/x"},
+                      defied_paths={"/internal/x"})
     miner = Profile("ua", None, standards_read={"robots"}, standards_mined={"robots"})
 
     check("read + clean = compliant", compliant.state == STATE_COMPLIANT)
@@ -268,7 +269,8 @@ def test_policies() -> None:
     print("\npolicy surfaces")
     secret = b"s" * 32
     for policy in policies.POLICY_FILES:
-        body, token = policies.render(policy, secret, "1.1.1.1", "ua", "https://x.test")
+        body, tokens = policies.render(policy, secret, "1.1.1.1", "ua", "https://x.test")
+        token = tokens[policy.standard]
         path = policies.trap_path(policy.standard, token)
         found = beacons.find_in_path(secret, path)
         if path not in body or found is None or found.standard != policy.standard:
@@ -284,6 +286,79 @@ def test_policies() -> None:
     check("control path is allowed", not policies.disallowed(policies.STABLE_ALLOW_UNLINKED))
 
 
+def test_robots_rules() -> None:
+    print("\nrobots.txt evaluation (RFC 9309)")
+    gpt = "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)"
+    polite = "Mozilla/5.0 (compatible; PoliteBot/1.0)"
+    d = policies.disallowed
+    check("generic UA: /internal/ disallowed", d("/internal/x.html", polite))
+    check("generic UA: docs allowed", not d("/docs/p001/00.html", polite))
+    check("GPTBot group selected: docs disallowed", d("/docs/p001/00.html", gpt))
+    check("group match is case-insensitive", d("/docs/", "gptbot/1.0"))
+    check("token must be a whole word", not d("/docs/", "NotGPTBotX/1.0"))
+    check("/robots.txt is always allowed", not d("/robots.txt", gpt))
+
+    control = policies.trap_path("control_allow", "x" * 26)
+    check("control allow sits under a Disallow prefix", control.startswith("/internal/"))
+    check("longer Allow beats shorter Disallow", not d(control, polite))
+    check("but GPTBot's own group still forbids it", d(control, gpt))
+
+    G, R = policies.RobotsGroup, policies.RobotsRule
+    tie = (G(("*",), (R("disallow", "/a"), R("allow", "/a"))),)
+    check("Allow wins a length tie", not policies.evaluate(tie, "/a/b", "x"))
+    longer = (G(("*",), (R("allow", "/a"), R("disallow", "/a/b"))),)
+    check("longest match wins", policies.evaluate(longer, "/a/b/c", "x"))
+    check("non-matching path allowed", not policies.evaluate(longer, "/z", "x"))
+    wild = (G(("*",), (R("disallow", "/*.pdf$"),)),)
+    check("* wildcard and $ anchor", policies.evaluate(wild, "/x/y.pdf", "x")
+          and not policies.evaluate(wild, "/x/y.pdf?z", "x"))
+    merged = (G(("BotA",), (R("disallow", "/a"),)), G(("BotA",), (R("disallow", "/b"),)),
+              G(("*",), (R("disallow", "/c"),)))
+    check("same-agent groups are merged", policies.evaluate(merged, "/a", "BotA")
+          and policies.evaluate(merged, "/b", "BotA"))
+    check("a specific group replaces *", not policies.evaluate(merged, "/c", "BotA"))
+    check("empty Disallow allows all", not policies.evaluate((G(("*",), (R("disallow", ""),)),), "/x", "y"))
+
+    # Rendering and judging share one source of truth. Re-parse the served
+    # text and confirm it judges every probe path the same way the data does.
+    secret = b"r" * 32
+    body, tokens = policies.render(policies.BY_PATH["/robots.txt"], secret, "1.1.1.1", polite, "https://x.test")
+    parsed = policies.parse_robots(body)
+    probes = ["/", "/docs/p001/00.html", "/internal/a", "/public/", policies.STABLE_ALLOW_UNLINKED,
+              policies.STABLE_DISALLOW_LINKED, policies.trap_path("robots", tokens["robots"]),
+              policies.trap_path("control_allow", tokens["control_allow"]), "/private/x"]
+    drift = [(path, ua) for path in probes for ua in (polite, gpt, "CCBot/2.0", "Bytespider")
+             if policies.evaluate(parsed, path, ua) != policies.disallowed(path, ua)]
+    check("served robots.txt judges identically to the rule data", not drift, str(drift[:3]))
+    check("robots.txt carries the control Allow", f"Allow: {policies.trap_path('control_allow', tokens['control_allow'])}" in body)
+
+
+def test_defiance_ordering() -> None:
+    print("\ndefiant vs ignorant")
+    gpt = "Mozilla/5.0 (compatible; GPTBot/1.2)"
+    read = lambda ua, std="robots": {"kind": "policy_read", "ua": ua, "ip": "1.1.1.1", "standard": std}  # noqa: E731
+    fetch = lambda ua, path, res="page": {"kind": "request", "ua": ua, "ip": "1.1.1.1", "path": path,  # noqa: E731
+                                          "status": 200, "resource": res}
+
+    def state(events):
+        return next(iter(profiles_from(events).values())).state
+
+    check("GPTBot reads robots then fetches docs: defiant",
+          state([read(gpt), fetch(gpt, "/docs/p001/00.html")]) == STATE_DEFIANT)
+    check("generic bot fetching docs after robots: compliant",
+          state([read("Bot"), fetch("Bot", "/docs/p001/00.html")]) == STATE_COMPLIANT)
+    check("read llms.txt only, then disallowed fetch: ignorant (robots carries the rule)",
+          state([read("Bot", "llms"), fetch("Bot", "/internal/x", "restricted")]) == STATE_IGNORANT)
+    check("violation before reading robots: ignorant",
+          state([fetch("Bot", "/internal/x", "restricted"), read("Bot")]) == STATE_IGNORANT)
+    check("violation after reading robots: defiant",
+          state([read("Bot"), fetch("Bot", "/internal/x", "restricted")]) == STATE_DEFIANT)
+    check("reading a policy file is never a violation",
+          state([read(gpt), fetch(gpt, "/llms.txt", "policy")]) == STATE_COMPLIANT)
+    check("404s are not violations",
+          state([read("Bot"), {**fetch("Bot", "/internal/x", "not_found"), "status": 404}]) == STATE_COMPLIANT)
+
+
 if __name__ == "__main__":
     test_beacons()
     test_secret_loading()
@@ -293,6 +368,8 @@ if __name__ == "__main__":
     test_states()
     test_standard_kinds()
     test_policies()
+    test_robots_rules()
+    test_defiance_ordering()
     if failures:
         print("\nFAILURES: " + ", ".join(failures))
     else:

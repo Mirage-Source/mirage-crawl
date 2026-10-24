@@ -6,7 +6,7 @@ otherwise:
 
     compliant  read a policy file, fetched nothing disallowed
     ignorant   never read a policy file, fetched disallowed content
-    defiant    read a policy file, then fetched disallowed content anyway
+    defiant    read robots.txt, then fetched content it disallows anyway
     miner      read a policy file and used it as a source of URLs, fetching a
                path that appears in that file and nowhere else
 
@@ -56,6 +56,8 @@ class Profile:
     standards_read: set[str] = field(default_factory=set)
     standards_mined: set[str] = field(default_factory=set)
     disallowed_paths: set[str] = field(default_factory=set)
+    # The subset fetched *after* this client read robots.txt.
+    defied_paths: set[str] = field(default_factory=set)
 
     executes_js: bool = False
     loads_css: bool = False
@@ -96,9 +98,9 @@ class Profile:
     def state(self) -> str:
         if self.standards_mined:
             return STATE_MINER
-        if self.disallowed_paths and self.standards_read:
+        if self.defied_paths:
             return STATE_DEFIANT
-        if self.disallowed_paths and not self.standards_read:
+        if self.disallowed_paths:
             return STATE_IGNORANT
         if self.standards_read:
             return STATE_COMPLIANT
@@ -128,6 +130,7 @@ class Profile:
             "standards_read": sorted(self.standards_read),
             "standards_mined": sorted(self.standards_mined),
             "disallowed_fetched": sorted(self.disallowed_paths),
+            "defied": sorted(self.defied_paths),
             "split_fleet_hits": self.split_fleet_hits,
             "max_read_to_fetch_delay_s": round(self.max_read_to_fetch_delay, 1),
             "executes_js": self.executes_js,
@@ -153,6 +156,20 @@ class Profile:
             "miners": sorted(self.miners),
             "mitre": sorted(self.mitre),
         }
+
+
+# Resources whose fetch can break a robots rule. Policy files are excluded on
+# purpose: a client has to fetch llms.txt to learn what llms.txt says, so
+# reading a policy can never count as violating one. Hunt probes are attacks,
+# judged elsewhere.
+_JUDGED_RESOURCES = {
+    "index", "docs_index", "project_index", "page", "restricted", "public",
+    "asset_css", "asset_js", "stable_disallow_unlinked", "stable_allow_unlinked",
+}
+
+
+def _judged(resource: str | None) -> bool:
+    return bool(resource) and (resource in _JUDGED_RESOURCES or resource.startswith("trap:"))
 
 
 def _key(ua: str, claimed: str | None) -> tuple[str, str]:
@@ -187,6 +204,12 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             resource = event.get("resource")
             path = event.get("path", "")
             status = event.get("status")
+            # Judged per request, per the UA's own robots group, in log order:
+            # only a violation *after* reading robots is defiance.
+            if status == 200 and _judged(resource) and policies.disallowed(path, ua):
+                p.disallowed_paths.add(path)
+                if p.standards_read & set(policies.ROBOTS_STANDARDS):
+                    p.defied_paths.add(path)
             if status in (200, 304) and resource in ("page", "index", "docs_index", "project_index"):
                 seen_before = p._paths_seen[path]
                 p._paths_seen[path] += 1
@@ -226,8 +249,6 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             elif standard == "control_allow":
                 p.respects_specificity = True
 
-            if event.get("disallowed"):
-                p.disallowed_paths.add(event.get("path", ""))
             if event.get("split_fleet"):
                 p.split_fleet_hits += 1
             delay = event.get("delay_seconds")
@@ -257,13 +278,6 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             p.identity_verdict = event.get("verdict")
             p.identity_detail = event.get("detail")
             p.operator = p.operator or event.get("operator")
-
-    # A disallowed fetch reached through an ordinary link is recorded on the
-    # request stream rather than as a trap hit, so fold those in too.
-    for event in eventlog.read_events(log_dir, kinds={eventlog.EVENT_REQUEST}):
-        if event.get("resource") == "restricted" and event.get("status") == 200:
-            p = profile_for(event.get("ua", ""), event.get("claimed_crawler"))
-            p.disallowed_paths.add(event.get("path", ""))
 
     return profiles
 

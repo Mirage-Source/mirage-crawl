@@ -20,6 +20,7 @@ real site than any other.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -51,7 +52,9 @@ TRAP_TEMPLATES: dict[str, str] = {
     "hidden_link": "/docs/restricted/{t}/hidden-target.html",
     "js_beacon": "/assets/rt/{t}/ping.json",
     "css_beacon": "/assets/img/{t}/bg.png",
-    "control_allow": "/public/allowed/{t}/notice.html",
+    # Under /internal/ on purpose: robots.txt Disallows /internal/ and Allows
+    # this exact path, so only a client applying longest-match fetches it.
+    "control_allow": "/internal/allowed/{t}/notice.html",
 }
 
 # What fetching a beacon's trap path *means* depends on how the file that
@@ -129,9 +132,10 @@ class PolicyFile:
     path: str
     standard: str
     content_type: str
-    render: Callable[[str, str], str]
-    # Standards whose beacons this file leaks, for the report's matrix.
-    aliases: tuple[str, ...] = ()
+    render: Callable[..., str]
+    # Further beacons this file carries besides its own, passed to the
+    # renderer as keyword arguments (standard -> trap path).
+    extras: tuple[str, ...] = ()
 
 
 # -- renderers ------------------------------------------------------------
@@ -139,42 +143,155 @@ class PolicyFile:
 # Each takes (trap_path, site_origin) and returns the file body.
 
 
-def _robots(trap: str, origin: str) -> str:
-    return f"""# Crawl policy for {origin}
-# Contact: research@example.invalid
+# -- robots.txt as data -----------------------------------------------------
+#
+# The rules are data, not a string template, because the same rules are
+# needed twice: once to render robots.txt and once to judge whether a fetch
+# broke them. Two copies would drift (they already had: the old judge ignored
+# the per-UA groups entirely, so GPTBot fetching /docs/ under "Disallow: /"
+# looked compliant).
 
-User-agent: *
-Disallow: /internal/
-Disallow: /private/
-Disallow: /reserved/
-Disallow: /docs/restricted/
-Disallow: {trap}
-Disallow: {STABLE_DISALLOW_UNLINKED}
-Disallow: {STABLE_DISALLOW_LINKED}
-Allow: /public/
-Allow: {STABLE_ALLOW_UNLINKED}
-Crawl-delay: 10
 
-User-agent: GPTBot
-Disallow: /
+@dataclass(frozen=True)
+class RobotsRule:
+    directive: str  # "allow" | "disallow"
+    path: str
+    # A rule whose path is a per-requester trap. "self" is the serving file's
+    # own standard; anything else names a standard in TRAP_TEMPLATES.
+    trap: str | None = None
 
-User-agent: ClaudeBot
-Disallow: /
+    def patterns(self) -> tuple[str, ...]:
+        """The path(s) as a judge sees them: a trap's token becomes a wildcard.
 
-User-agent: CCBot
-Disallow: /
+        "self" depends on which robots file served it, so it judges as both.
+        """
+        if self.trap is None:
+            return (self.path,)
+        standards = ROBOTS_STANDARDS if self.trap == "self" else (self.trap,)
+        return tuple(TRAP_TEMPLATES[std].format(t="*") for std in standards)
 
-User-agent: Google-Extended
-Disallow: /
 
-User-agent: Bytespider
-Disallow: /
+@dataclass(frozen=True)
+class RobotsGroup:
+    agents: tuple[str, ...]
+    rules: tuple[RobotsRule, ...]
+    crawl_delay: int | None = None
 
-User-agent: PerplexityBot
-Disallow: /
 
-Sitemap: {origin}/sitemap.xml
-"""
+# The two files that carry the robots rules. "Defiant" means a client read one
+# of these and then broke a rule in it.
+ROBOTS_STANDARDS = ("robots", "robots_wellknown")
+
+ROBOTS_GROUPS: tuple[RobotsGroup, ...] = (
+    RobotsGroup(
+        ("*",),
+        (
+            RobotsRule("disallow", "/internal/"),
+            RobotsRule("disallow", "/private/"),
+            RobotsRule("disallow", "/reserved/"),
+            RobotsRule("disallow", "/docs/restricted/"),
+            RobotsRule("disallow", "", trap="self"),
+            RobotsRule("disallow", STABLE_DISALLOW_UNLINKED),
+            RobotsRule("disallow", STABLE_DISALLOW_LINKED),
+            RobotsRule("allow", "/public/"),
+            RobotsRule("allow", STABLE_ALLOW_UNLINKED),
+            RobotsRule("allow", "", trap="control_allow"),
+        ),
+        crawl_delay=10,
+    ),
+    *(
+        RobotsGroup((agent,), (RobotsRule("disallow", "/"),))
+        for agent in ("GPTBot", "ClaudeBot", "CCBot", "Google-Extended", "Bytespider", "PerplexityBot")
+    ),
+)
+
+
+def _robots(trap: str, origin: str, control_allow: str = "") -> str:
+    traps = {"self": trap, "control_allow": control_allow}
+    out = [f"# Crawl policy for {origin}", "# Contact: research@example.invalid", ""]
+    for group in ROBOTS_GROUPS:
+        out.extend(f"User-agent: {agent}" for agent in group.agents)
+        for rule in group.rules:
+            path = traps.get(rule.trap, "") if rule.trap else rule.path
+            if rule.trap and not path:
+                continue
+            out.append(f"{rule.directive.capitalize()}: {path}")
+        if group.crawl_delay is not None:
+            out.append(f"Crawl-delay: {group.crawl_delay}")
+        out.append("")
+    out.append(f"Sitemap: {origin}/sitemap.xml")
+    return "\n".join(out) + "\n"
+
+
+def parse_robots(text: str) -> tuple[RobotsGroup, ...]:
+    """Parse robots.txt text into groups (RFC 9309 section 2.2).
+
+    Consecutive user-agent lines open one group; a rule line after them
+    closes the agent list. Unknown lines (Sitemap, Crawl-delay, comments)
+    are ignored for judging.
+    """
+    groups: list[RobotsGroup] = []
+    agents: list[str] = []
+    rules: list[RobotsRule] = []
+    in_rules = False
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if ":" not in line:
+            continue
+        key, value = (part.strip() for part in line.split(":", 1))
+        key = key.lower()
+        if key == "user-agent":
+            if in_rules:
+                groups.append(RobotsGroup(tuple(agents), tuple(rules)))
+                agents, rules, in_rules = [], [], False
+            agents.append(value)
+        elif key in ("allow", "disallow") and agents:
+            in_rules = True
+            rules.append(RobotsRule(key, value))
+    if agents:
+        groups.append(RobotsGroup(tuple(agents), tuple(rules)))
+    return tuple(groups)
+
+
+def _agent_matches(token: str, user_agent: str) -> bool:
+    # Case-insensitive, and the token must stand alone ("GPTBot" matches
+    # "compatible; GPTBot/1.2" but not "NotGPTBotX").
+    return re.search(
+        r"(?<![A-Za-z0-9_-])" + re.escape(token) + r"(?![A-Za-z0-9_-])", user_agent, re.I
+    ) is not None
+
+
+def _pattern_regex(pattern: str) -> re.Pattern:
+    anchored = pattern.endswith("$")
+    body = pattern[:-1] if anchored else pattern
+    regex = ".*".join(re.escape(part) for part in body.split("*"))
+    return re.compile(regex + ("$" if anchored else ""))
+
+
+def evaluate(groups: tuple[RobotsGroup, ...], path: str, user_agent: str) -> bool:
+    """True if `path` is disallowed for `user_agent` under `groups`.
+
+    RFC 9309: every group naming this agent is merged; if none does, the "*"
+    groups apply. The longest matching rule wins, and Allow wins a tie.
+    /robots.txt itself is always allowed.
+    """
+    if path == "/robots.txt":
+        return False
+    specific = [g for g in groups if any(a != "*" and _agent_matches(a, user_agent) for a in g.agents)]
+    chosen = specific or [g for g in groups if "*" in g.agents]
+
+    best_len, best_allow = -1, True
+    for group in chosen:
+        for rule in group.rules:
+            for pattern in rule.patterns():
+                if not pattern:
+                    continue  # "Disallow:" with no value allows everything
+                if not _pattern_regex(pattern).match(path):
+                    continue
+                allow = rule.directive == "allow"
+                if len(pattern) > best_len or (len(pattern) == best_len and allow):
+                    best_len, best_allow = len(pattern), allow
+    return not best_allow
 
 
 def _llms(trap: str, origin: str) -> str:
@@ -325,8 +442,9 @@ def _noai(trap: str, origin: str) -> str:
 
 
 POLICY_FILES: tuple[PolicyFile, ...] = (
-    PolicyFile("/robots.txt", "robots", "text/plain; charset=utf-8", _robots),
-    PolicyFile("/.well-known/robots.txt", "robots_wellknown", "text/plain; charset=utf-8", _robots),
+    PolicyFile("/robots.txt", "robots", "text/plain; charset=utf-8", _robots, ("control_allow",)),
+    PolicyFile("/.well-known/robots.txt", "robots_wellknown", "text/plain; charset=utf-8", _robots,
+               ("control_allow",)),
     PolicyFile("/llms.txt", "llms", "text/markdown; charset=utf-8", _llms),
     PolicyFile("/llms-full.txt", "llms_full", "text/markdown; charset=utf-8", _llms_full),
     PolicyFile("/ai.txt", "ai", "text/plain; charset=utf-8", _ai_txt),
@@ -348,16 +466,24 @@ POLICY_FILES: tuple[PolicyFile, ...] = (
 BY_PATH: dict[str, PolicyFile] = {p.path: p for p in POLICY_FILES}
 
 
-def render(policy: PolicyFile, secret: bytes, ip: str, user_agent: str, origin: str) -> tuple[str, str]:
-    """Return (body, token) with a freshly minted beacon embedded."""
-    token = beacons.mint(secret, policy.standard, ip, user_agent)
-    return policy.render(trap_path(policy.standard, token), origin), token
+def render_with(policy: PolicyFile, mint: Callable[[str], str], origin: str) -> tuple[str, dict[str, str]]:
+    """Render a policy file, minting its own beacon and any extras through `mint`.
+
+    Returns (body, {standard: token}).
+    """
+    tokens = {policy.standard: mint(policy.standard)}
+    extra_paths = {}
+    for standard in policy.extras:
+        tokens[standard] = mint(standard)
+        extra_paths[standard] = trap_path(standard, tokens[standard])
+    return policy.render(trap_path(policy.standard, tokens[policy.standard]), origin, **extra_paths), tokens
 
 
-def disallowed(path: str) -> bool:
-    """Whether a path is covered by a Disallow rule we publish to everyone."""
-    prefixes = ("/internal/", "/private/", "/reserved/", "/docs/restricted/")
-    return path.startswith(prefixes) or path in (
-        STABLE_DISALLOW_UNLINKED,
-        STABLE_DISALLOW_LINKED,
-    )
+def render(policy: PolicyFile, secret: bytes, ip: str, user_agent: str, origin: str) -> tuple[str, dict[str, str]]:
+    """Return (body, tokens) with freshly minted beacons embedded."""
+    return render_with(policy, lambda std: beacons.mint(secret, std, ip, user_agent), origin)
+
+
+def disallowed(path: str, user_agent: str = "") -> bool:
+    """Whether robots.txt, as we publish it, forbids `path` to `user_agent`."""
+    return evaluate(ROBOTS_GROUPS, path, user_agent)
