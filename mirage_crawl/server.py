@@ -27,6 +27,7 @@ import stat
 import time
 from html import escape
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -117,6 +118,8 @@ class Sensor:
         # Filled in by start_sites(): socket name -> listener role.
         self.listeners: dict[tuple, str] = {}
         self.public_address: tuple | None = None
+        # URLs pointing at ourselves are never indicators.
+        self._own_host = urlsplit(config.origin).hostname
         self.proxy_address: tuple | None = None
 
     # -- helpers -----------------------------------------------------------
@@ -238,6 +241,10 @@ class Sensor:
         raw_path, raw_query = capture.split_raw(request.raw_path)
         request["rid"] = secrets.token_hex(8)
         request["body"] = await capture.read_body(request, self.config.body_bytes)
+        findings, indicator_locations = capture.scan_request(
+            raw_path, raw_query, headers, request["body"], self._own_host
+        )
+        request["findings"] = findings
         version = f"{request.version.major}.{request.version.minor}"
         fp = build_fingerprint(user_agent=ua, raw_header_names=raw_names, http_version=version)
         request["fp"] = fp
@@ -288,6 +295,8 @@ class Sensor:
             resource=request.get("resource_kind"),
             content_hash=request.get("content_hash"),
             fork_of=request.get("fork_of"),
+            indicators=findings.as_dict() if findings.any() else None,
+            indicator_locations=indicator_locations or None,
             **capture.body_fields(request["body"], self.config.body_log_bytes),
         )
 
@@ -556,8 +565,7 @@ class Sensor:
         captured: capture.Body | None = request["body"]
         body = captured.text() if captured is not None else ""
 
-        surface = f"{request.path}?{request.query_string}\n{body}"
-        findings = hunt.scan_payload(surface)
+        findings: hunt.PayloadFindings = request["findings"]
 
         self.emit(
             request,

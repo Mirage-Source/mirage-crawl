@@ -90,6 +90,8 @@ class Profile:
     payload_urls: set[str] = field(default_factory=set)
     miners: set[str] = field(default_factory=set)
     mitre: set[str] = field(default_factory=set)
+    # Exploit attempts seen anywhere in this client's requests.
+    exploits: set[str] = field(default_factory=set)
 
     _paths_seen: dict[str, int] = field(default_factory=lambda: defaultdict(int), repr=False)
     _hashes_seen: dict[str, int] = field(default_factory=lambda: defaultdict(int), repr=False)
@@ -155,6 +157,7 @@ class Profile:
             "payload_urls": sorted(self.payload_urls),
             "miners": sorted(self.miners),
             "mitre": sorted(self.mitre),
+            "exploits": sorted(self.exploits),
         }
 
 
@@ -170,6 +173,22 @@ _JUDGED_RESOURCES = {
 
 def _judged(resource: str | None) -> bool:
     return bool(resource) and (resource in _JUDGED_RESOURCES or resource.startswith("trap:"))
+
+
+def _absorb_indicators(p: Profile, indicators: dict | None) -> None:
+    if not indicators:
+        return
+    for currency, addresses in (indicators.get("wallets") or {}).items():
+        p.wallets.setdefault(currency, set()).update(addresses)
+    p.pools.update(indicators.get("pools") or ())
+    p.payload_urls.update(indicators.get("urls") or ())
+    p.miners.update(indicators.get("miners") or ())
+    if indicators.get("jndi"):
+        p.exploits.add("log4shell")
+    if indicators.get("shellshock"):
+        p.exploits.add("shellshock")
+    if indicators.get("metadata_ssrf"):
+        p.exploits.add("metadata_ssrf")
 
 
 def _key(ua: str, claimed: str | None) -> tuple[str, str]:
@@ -220,6 +239,10 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
                 if event.get("conditional"):
                     p.conditional_requests += 1
 
+            # Every request is scanned, not just hunt routes, so indicators
+            # are read from the request stream.
+            _absorb_indicators(p, event.get("indicators"))
+
             content_hash = event.get("content_hash")
             if content_hash:
                 if p._hashes_seen[content_hash]:
@@ -266,12 +289,6 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             if event.get("ja4"):
                 p.ja4.add(event["ja4"])
 
-            indicators = event.get("indicators") or {}
-            for currency, addresses in (indicators.get("wallets") or {}).items():
-                p.wallets.setdefault(currency, set()).update(addresses)
-            p.pools.update(indicators.get("pools") or ())
-            p.payload_urls.update(indicators.get("urls") or ())
-            p.miners.update(indicators.get("miners") or ())
 
         elif kind == eventlog.EVENT_IDENTITY:
             p = profile_for(ua, event.get("claimed"))
