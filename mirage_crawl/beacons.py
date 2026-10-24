@@ -130,6 +130,10 @@ def parse(secret: bytes, token: str) -> Beacon | None:
 
     if len(raw) != _TOKEN_BYTES:
         return None
+    # 26 chars carry 156 bits for 152 bits of token; the decoder ignores the
+    # spare 4. Reject non-canonical spellings so one token has one string.
+    if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != token:
+        return None
 
     payload, mac = raw[:_PAYLOAD_LEN], raw[_PAYLOAD_LEN:]
     expected = hmac.new(secret, payload, hashlib.blake2s).digest()[:_MAC_LEN]

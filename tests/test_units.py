@@ -57,6 +57,17 @@ def test_beacons() -> None:
             corrupted += 1
     check("every single-char mutation rejected", corrupted == len(token), f"{corrupted}/{len(token)}")
 
+    # The last base64 char of a 19-byte token carries 4 padding bits. Only the
+    # canonical spelling may verify, or one token has 16 valid spellings and
+    # the trap-hit token no longer joins to the policy read that minted it.
+    malleable = 0
+    for i in range(200):
+        t = beacons.mint(secret, "robots", f"10.1.0.{i % 250}", "ua", now=1.8e9 + i)
+        for c in "ABCDEFGHIJKLMNOP":
+            if t[:-1] + c != t and beacons.parse(secret, t[:-1] + c) is not None:
+                malleable += 1
+    check("only the canonical spelling verifies", malleable == 0, f"{malleable} alternates accepted")
+
     check("every standard has a code", all(s in beacons.STANDARD_CODES for s in policies.TRAP_TEMPLATES))
     check("codes are unique", len(set(beacons.STANDARD_CODES.values())) == len(beacons.STANDARD_CODES))
     check("token length is stable", all(
