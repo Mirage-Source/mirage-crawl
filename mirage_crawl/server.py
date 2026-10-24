@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from . import beacons, capture, credentials, eventlog, hunt, policies
+from . import beacons, capture, credentials, eventlog, hunt, personas, policies
 from .config import Config
 from .fingerprint import build as build_fingerprint
 from .identity import RangeTable, VerifierCache
@@ -160,6 +160,7 @@ class Sensor:
         # URLs pointing at ourselves are never indicators.
         self._own_host = urlsplit(config.origin).hostname
         self.proxy_address: tuple | None = None
+        self.persona_addresses: dict[str, tuple] = {}
 
         # Hostnames that get the docs face: the origin's host plus any extras.
         hosts = {h.strip().lower() for h in config.site_hosts.split(",") if h.strip()}
@@ -306,17 +307,23 @@ class Sensor:
         request["ja4"] = ja4
         request["listener"] = listener
         request["face"] = self.face_of(request, listener)
+        persona = personas.get(listener)
 
         try:
-            response = await handler(request)
+            # A persona port never uses the shared docs router: on :11434 the
+            # request is for Ollama, not for /robots.txt.
+            if persona is not None:
+                response = await self.persona_dispatch(request, persona)
+            else:
+                response = await handler(request)
         except web.HTTPException as exc:
             response = exc
         except Exception:
             response = web.Response(status=500, text="internal error")
 
-        # Replace aiohttp's stack-revealing Server header on every response,
-        # successful or error.
-        response.headers["Server"] = self.config.server_header
+        # Replace aiohttp's stack-revealing Server header on every response.
+        # A persona sets its own via request["server_header"].
+        response.headers["Server"] = request.get("server_header") or self.config.server_header
 
         duration_us = int((time.perf_counter() - start) * 1_000_000)
 
@@ -674,6 +681,51 @@ class Sensor:
             )
         raise web.HTTPNotFound(text="not found")
 
+    async def persona_dispatch(self, request: web.Request, persona: personas.Persona) -> web.Response:
+        """Serve one request on a persona port.
+
+        Matching is scoped to the persona's own service families, so the port
+        decides the product and path collisions vanish. An unrecognised path
+        on a live service port gets the persona's default reply, because a real
+        service answers something on its own port rather than going silent.
+        """
+        request["server_header"] = persona.server_header
+        probe = persona.match(request.path)
+        if probe is not None:
+            return await self.hunt_probe(request, probe)
+
+        fp = request["fp"]
+        request["resource_kind"] = f"persona:{persona.name}"
+        served = persona.default_decoy is not None and self.config.hunt_decoys
+        self.emit(
+            request,
+            eventlog.EVENT_HUNT,
+            ip=request["ip"],
+            method=request.method,
+            path=request.path,
+            query=request.query_string or None,
+            family=persona.name,
+            target=persona.name,
+            category="recon",
+            intent="probe a known service port on an unmapped path",
+            mitre=["T1046"],
+            ua=fp.user_agent[:400],
+            claimed_crawler=fp.claimed_crawler,
+            ja4=request["ja4"],
+            indicators=(request["findings"].as_dict() if request["findings"].any() else None),
+            decoy_served=served,
+        )
+        if served:
+            # A service-shaped 404 body, not aiohttp's: a real service returns
+            # its own not-found JSON for an unknown route on its own port.
+            return web.Response(
+                status=404,
+                text=persona.default_decoy,
+                content_type=persona.default_content_type,
+                headers={"Cache-Control": "no-store"},
+            )
+        raise web.HTTPNotFound(text="not found")
+
     async def health(self, request: web.Request) -> web.Response:
         # Sensor internals (decoys on, probe counts) are the clearest possible
         # "this is a honeypot" tell. Anywhere but the admin socket, /healthz
@@ -809,4 +861,8 @@ async def start_sites(app: web.Application, config: Config) -> web.AppRunner:
     if config.proxy_listen:
         host, _, port = config.proxy_listen.rpartition(":")
         sensor.proxy_address = await add(_tcp_socket(host or "127.0.0.1", int(port)), LISTENER_PROXY)
+
+    for name, port in personas.parse_ports(config.persona_ports):
+        address = await add(_tcp_socket(config.host, port), name)
+        sensor.persona_addresses[name] = address
     return runner

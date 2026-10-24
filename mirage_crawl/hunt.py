@@ -140,6 +140,12 @@ PROBES: tuple[Probe, ...] = (
     _p(r"^/api/(jobs|serve/applications|cluster_status)/?", "ray", "Ray dashboard",
        CATEGORY_GPU, "submit arbitrary jobs to a GPU cluster (ShadowRay pattern)",
        ("T1190", "T1496", "T1610"), _RAY_VERSION),
+    # Ray also answers /api/version, but Ollama's rule above wins on a shared
+    # port (it is scanned more). On the Ray persona port, family-scoped
+    # matching reaches this one instead.
+    _p(r"^/api/version/?$", "ray", "Ray dashboard", CATEGORY_GPU,
+       "fingerprint the Ray version before the ShadowRay job-submit chain",
+       ("T1046", "T1592"), _RAY_VERSION),
     _p(r"^/(api/kernels|api/sessions|api/contents|tree|lab)(/|$)", "jupyter", "Jupyter",
        CATEGORY_GPU, "obtain code execution on a notebook host, usually GPU-backed",
        ("T1190", "T1059.006"), _JUPYTER_KERNELS),

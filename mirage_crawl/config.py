@@ -83,6 +83,10 @@ class Config:
     # Header carrying the JA4 fingerprint, injected by the TLS front.
     ja4_header: str = "X-Mirage-JA4"
 
+    # Per-service persona ports: "ollama:11434,ray:8265,docker,jupyter". A
+    # bare name uses that persona's conventional port. Empty means none.
+    persona_ports: str = ""
+
     # Hostnames the documentation face answers to. Empty means "derive from
     # the origin": a request whose Host matches gets the docs site, anything
     # else (bare IP, wrong name, no Host) gets the attack face.
@@ -121,6 +125,7 @@ class Config:
             ja4_header=os.environ.get("CRAWL_JA4_HEADER", "X-Mirage-JA4"),
             server_header=os.environ.get("CRAWL_SERVER_HEADER", "nginx"),
             site_hosts=os.environ.get("CRAWL_SITE_HOSTS", ""),
+            persona_ports=os.environ.get("CRAWL_PERSONA_PORTS", ""),
         )
         if not cfg.origin:
             cfg.origin = f"http://localhost:{cfg.port}"
