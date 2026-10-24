@@ -26,6 +26,7 @@ import ssl
 import sys
 from pathlib import Path
 
+from . import eventlog
 from . import ja4 as ja4mod
 
 HEAD_LIMIT = 32 * 1024
@@ -223,6 +224,11 @@ class Front:
         backend_socket: str,
         ja4_header: str = "X-Mirage-JA4",
         on_hello=None,
+        log: eventlog.EventLog | None = None,
+        hello_timeout: float = 10.0,
+        handshake_timeout: float = 15.0,
+        idle_timeout: float = 120.0,
+        max_connections: int = 512,
     ) -> None:
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.load_cert_chain(cert, key)
@@ -230,54 +236,80 @@ class Front:
         self.backend_socket = backend_socket
         self.ja4_header = ja4_header
         self.on_hello = on_hello
+        self.log = log
+        self.hello_timeout = hello_timeout
+        self.handshake_timeout = handshake_timeout
+        self.idle_timeout = idle_timeout
+        self.max_connections = max_connections
+        self.active = 0
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername") or ("0.0.0.0", 0)
-        client_ip = peer[0]
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        # One record per connection, written however the connection ends. A
+        # scanner that only handshakes (or sends HTTP to :443) never reaches
+        # the sensor, so this is the only trace it leaves.
+        info: dict = {
+            "ip": peer[0], "port": peer[1], "ja4": None, "sni": None, "alpn": [],
+            "versions": [], "handshake_ok": False, "error": None, "phase": "hello",
+        }
 
+        if self.active >= self.max_connections:
+            # Refuse rather than queue: a queued connection still holds a socket.
+            info["error"] = "over_capacity"
+            await self._close(writer)
+            self._emit(info, loop.time() - started)
+            return
+
+        self.active += 1
         try:
-            await self._session(reader, writer, client_ip)
+            await self._session(reader, writer, info)
+        except asyncio.TimeoutError:
+            info["error"] = f"{info['phase']}_timeout"
         except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
-            pass
-        except ssl.SSLError:
-            pass
+            info["error"] = info["error"] or "reset"
+        except ssl.SSLError as exc:
+            info["error"] = info["error"] or f"ssl:{exc.reason or exc.__class__.__name__}"
         except Exception as exc:  # never let one connection kill the listener
-            print(f"tlsfront: {client_ip} {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            info["error"] = exc.__class__.__name__
+            print(f"tlsfront: {peer[0]} {exc.__class__.__name__}: {exc}", file=sys.stderr)
         finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+            self.active -= 1
+            await self._close(writer)
+            self._emit(info, loop.time() - started)
 
-    async def _session(self, reader, writer, client_ip: str) -> None:
-        # 1. Buffer the ClientHello and fingerprint it.
+    @staticmethod
+    async def _close(writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=2)
+        except Exception:
+            pass
+
+    def _emit(self, info: dict, duration: float) -> None:
+        if self.log is None:
+            return
+        record = {k: v for k, v in info.items() if k != "phase"}
+        record["duration_ms"] = int(duration * 1000)
+        self.log.emit(eventlog.EVENT_TLS, **record)
+
+    async def _read_hello(self, reader) -> bytes:
         buffered = b""
         while not ja4mod.client_hello_complete(buffered) and len(buffered) < HELLO_LIMIT:
+            if buffered and buffered[0] != 0x16:
+                break  # not a TLS handshake record; no point waiting for more
             chunk = await reader.read(8192)
             if not chunk:
-                return
+                break
             buffered += chunk
+        return buffered
 
-        fingerprint = None
-        hello = None
-        try:
-            fingerprint, hello = ja4mod.fingerprint(buffered)
-        except ja4mod.ParseError:
-            pass
-
-        if self.on_hello is not None:
-            self.on_hello(client_ip, fingerprint, hello)
-
-        # 2. Complete the handshake from the buffered bytes.
-        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-        tls = self.context.wrap_bio(incoming, outgoing, server_side=True)
-        incoming.write(buffered)
-
+    async def _handshake(self, reader, writer, tls, incoming, outgoing) -> bool:
         while True:
             try:
                 tls.do_handshake()
-                break
+                return True
             except ssl.SSLWantReadError:
                 pending = outgoing.read()
                 if pending:
@@ -285,8 +317,50 @@ class Front:
                     await writer.drain()
                 chunk = await reader.read(16384)
                 if not chunk:
-                    return
+                    return False
                 incoming.write(chunk)
+
+    async def _session(self, reader, writer, info: dict) -> None:
+        client_ip = info["ip"]
+
+        # 1. Buffer the ClientHello and fingerprint it.
+        buffered = await asyncio.wait_for(self._read_hello(reader), self.hello_timeout)
+        if not buffered:
+            info["error"] = "no_data"
+            return
+
+        fingerprint = None
+        hello = None
+        try:
+            fingerprint, hello = ja4mod.fingerprint(buffered)
+        except ja4mod.ParseError:
+            info["first_bytes"] = buffered[:64].decode("ascii", "backslashreplace")
+            info["error"] = "not_tls"
+
+        if hello is not None:
+            info["ja4"] = fingerprint
+            info["sni"] = hello.sni
+            info["alpn"] = list(hello.alpn)
+            info["versions"] = [f"0x{v:04x}" for v in (hello.supported_versions or (hello.tls_version,))]
+
+        if self.on_hello is not None:
+            self.on_hello(client_ip, fingerprint, hello)
+        if hello is None:
+            return
+
+        # 2. Complete the handshake from the buffered bytes.
+        info["phase"] = "handshake"
+        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        tls = self.context.wrap_bio(incoming, outgoing, server_side=True)
+        incoming.write(buffered)
+        ok = await asyncio.wait_for(
+            self._handshake(reader, writer, tls, incoming, outgoing), self.handshake_timeout
+        )
+        if not ok:
+            info["error"] = "closed_in_handshake"
+            return
+        info["handshake_ok"] = True
+        info["phase"] = "idle"
 
         pending = outgoing.read()
         if pending:
@@ -353,7 +427,7 @@ class Front:
                     backend_writer.write(rewritten)
                     await backend_writer.drain()
 
-            chunk = await reader.read(16384)
+            chunk = await asyncio.wait_for(reader.read(16384), self.idle_timeout)
             if not chunk:
                 return
             incoming.write(chunk)
@@ -365,7 +439,7 @@ class Front:
 
     async def _to_client(self, backend_reader, writer, tls, outgoing) -> None:
         while True:
-            chunk = await backend_reader.read(16384)
+            chunk = await asyncio.wait_for(backend_reader.read(16384), self.idle_timeout)
             if not chunk:
                 return
             try:
@@ -384,18 +458,25 @@ async def serve(args) -> None:
         alpn = ",".join(getattr(hello, "alpn", ()) or ())
         print(f"{ip}  ja4={fingerprint or '-'}  sni={sni or '-'}  alpn={alpn or '-'}")
 
+    log = eventlog.EventLog(args.log_dir, args.sensor_id, prefix="tls-")
+    await log.start()
     front = Front(
         cert=args.cert,
         key=args.key,
         backend_socket=args.backend_socket,
         ja4_header=args.ja4_header,
         on_hello=log_hello if args.verbose else None,
+        log=log,
+        max_connections=args.max_connections,
     )
     server = await asyncio.start_server(front.handle, args.host, args.port)
     addresses = ", ".join(str(s.getsockname()) for s in server.sockets or ())
     print(f"mirage-crawl TLS front on {addresses} -> {args.backend_socket}")
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        await log.stop()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -407,6 +488,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend-socket", default="data/front.sock",
                         help="the sensor's front socket (CRAWL_FRONT_SOCKET)")
     parser.add_argument("--ja4-header", default="X-Mirage-JA4")
+    parser.add_argument("--log-dir", default="data/events",
+                        help="writes tls-YYYY-MM-DD.jsonl here, beside the sensor's own files")
+    parser.add_argument("--sensor-id", default="crawl-01")
+    parser.add_argument("--max-connections", type=int, default=512)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 

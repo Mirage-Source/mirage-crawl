@@ -32,7 +32,12 @@ EVENT_SENSOR = "sensor"
 
 
 class EventLog:
-    def __init__(self, directory: str | Path, sensor_id: str, queue_size: int = 10_000) -> None:
+    def __init__(
+        self, directory: str | Path, sensor_id: str, queue_size: int = 10_000, prefix: str = ""
+    ) -> None:
+        # A separate process (the TLS front) writes with its own prefix, so two
+        # processes never append to the same file.
+        self.prefix = prefix
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.sensor_id = sensor_id
@@ -67,7 +72,7 @@ class EventLog:
     def _open_for(self, day: str):
         if self._day != day:
             self._close()
-            self._handle = open(self.dir / f"{day}.jsonl", "a", encoding="utf-8", buffering=1)
+            self._handle = open(self.dir / f"{self.prefix}{day}.jsonl", "a", encoding="utf-8", buffering=1)
             self._day = day
         return self._handle
 
@@ -112,9 +117,13 @@ class EventLog:
 
 
 def read_events(directory: str | Path, kinds: set[str] | None = None):
-    """Iterate every logged event, oldest file first. Skips malformed lines."""
+    """Iterate every logged event, oldest day first. Skips malformed lines.
+
+    Files sort by the day in their name, so tls-2026-01-02 comes after
+    2026-01-01 rather than after every unprefixed file.
+    """
     directory = Path(directory)
-    for path in sorted(directory.glob("*.jsonl")):
+    for path in sorted(directory.glob("*.jsonl"), key=lambda p: (p.stem[-10:], p.stem)):
         with open(path, "r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()

@@ -70,6 +70,45 @@ def test_header_injection() -> None:
           b"X-Forwarded-For: 8.8.8.8" in inject_headers(head, None, "8.8.8.8", "X-Mirage-JA4"))
 
 
+async def test_front_limits(cert: str, key: str, tmp: Path) -> None:
+    print("\ntls front limits")
+    log = eventlog.EventLog(tmp / "limits", "t", prefix="tls-")
+    await log.start()
+    front = Front(cert=cert, key=key, backend_socket=str(tmp / "nowhere.sock"), log=log,
+                  hello_timeout=0.3, handshake_timeout=0.3, idle_timeout=0.3, max_connections=1)
+    server = await asyncio.start_server(front.handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    loop = asyncio.get_running_loop()
+    silent_r, silent_w = await asyncio.open_connection("127.0.0.1", port)
+    await asyncio.sleep(0.05)
+    # Over the cap: closed straight away rather than queued.
+    extra_r, extra_w = await asyncio.open_connection("127.0.0.1", port)
+    started = loop.time()
+    extra = await asyncio.wait_for(extra_r.read(), timeout=2)
+    check("connection over the cap is refused immediately", extra == b"" and loop.time() - started < 0.25)
+
+    started = loop.time()
+    silent = await asyncio.wait_for(silent_r.read(), timeout=3)
+    waited = loop.time() - started
+    check("silent client dropped at the hello timeout", silent == b"" and waited < 1.0, f"{waited:.2f}s")
+
+    # A half-sent ClientHello: header promises more than ever arrives.
+    slow_r, slow_w = await asyncio.open_connection("127.0.0.1", port)
+    slow_w.write(b"\x16\x03\x01\x02\x00\x01")
+    await slow_w.drain()
+    check("slowloris hello dropped", await asyncio.wait_for(slow_r.read(), timeout=3) == b"")
+    for w in (silent_w, extra_w, slow_w):
+        w.close()
+
+    server.close()
+    await log.stop()
+    events = list(eventlog.read_events(tmp / "limits"))
+    reasons = sorted({e.get("error") for e in events})
+    check("timeouts are logged with a reason", "hello_timeout" in reasons, str(reasons))
+    check("refusals are logged", "over_capacity" in reasons, str(reasons))
+
+
 async def run() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="mirage-tls-"))
     try:
@@ -88,9 +127,12 @@ async def run() -> int:
         runner = await start_sites(app, cfg)
 
         seen: list[tuple] = []
+        tls_log = eventlog.EventLog(cfg.log_dir, "tls-test", prefix="tls-")
+        await tls_log.start()
         front = Front(
             cert=cert, key=key,
             backend_socket=str(cfg.front_socket),
+            log=tls_log,
             on_hello=lambda ip, fp, hello: seen.append((ip, fp, hello)),
         )
         server = await asyncio.start_server(front.handle, "127.0.0.1", 0)
@@ -119,12 +161,22 @@ async def run() -> int:
                 hunt_status = resp2.status
                 hunt_body = await resp2.text()
 
+        # A scanner that speaks plain HTTP to :443 never completes a handshake
+        # and never reaches the sensor. It must still leave a record.
+        reader, writer = await asyncio.open_connection("127.0.0.1", front_port)
+        writer.write(b"GET / HTTP/1.0\r\n\r\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.read(), timeout=5)
+        writer.close()
+        await asyncio.sleep(0.2)
+
         server.close()
         try:
             await asyncio.wait_for(server.wait_closed(), timeout=5)
         except asyncio.TimeoutError:
             pass
         await runner.cleanup()
+        await tls_log.stop()
         await asyncio.sleep(0.3)
 
         check("request succeeded over TLS", status == 200, f"status {status}")
@@ -154,6 +206,23 @@ async def run() -> int:
 
         check("real client ip forwarded",
               bool(requests) and requests[0]["ip"] == "127.0.0.1", str(requests[:1]))
+
+        print("\ntls event log")
+        tls_files = sorted(p.name for p in Path(cfg.log_dir).glob("tls-*.jsonl"))
+        check("front writes its own tls-YYYY-MM-DD.jsonl", len(tls_files) == 1, str(tls_files))
+        tls_events = [e for e in events if e["kind"] == eventlog.EVENT_TLS]
+        # one keep-alive TLS connection (both HTTPS requests) + the plain-HTTP attempt
+        check("read_events picks up the tls file", len(tls_events) == 2, f"{len(tls_events)} tls events")
+        ok = [e for e in tls_events if e.get("handshake_ok")]
+        check("completed handshakes logged with ja4", bool(ok) and ok[0]["ja4"] == fingerprints[0] if fingerprints else False)
+        check("tls event carries alpn and versions", bool(ok) and ok[0]["alpn"] == ["http/1.1"]
+              and ok[0]["versions"], str(ok[:1]))
+        plain = [e for e in tls_events if not e.get("handshake_ok")]
+        check("non-TLS bytes on :443 still logged", bool(plain) and plain[0]["ja4"] is None, str(plain[:1]))
+        check("non-TLS attempt records what was sent",
+              bool(plain) and plain[0].get("first_bytes", "").startswith("GET / HTTP/1.0"), str(plain[:1]))
+
+        await test_front_limits(cert, key, tmp)
 
         print("\nhunt probe over TLS")
         check("ollama probe served a decoy", hunt_status == 200, f"status {hunt_status}")
