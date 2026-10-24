@@ -33,6 +33,22 @@ _OVERVIEW = [
 ]
 
 
+def _print_table(cols: list[str], rows: list[tuple], limit: int = 100) -> None:
+    shown = rows[:limit]
+    widths = [len(c) for c in cols]
+    cells = [[("" if v is None else str(v)) for v in row] for row in shown]
+    for row in cells:
+        for i, v in enumerate(row):
+            widths[i] = max(widths[i], len(v))
+    line = "  ".join(c.ljust(widths[i]) for i, c in enumerate(cols))
+    print(line)
+    print("  ".join("-" * widths[i] for i in range(len(cols))))
+    for row in cells:
+        print("  ".join(v.ljust(widths[i]) for i, v in enumerate(row)))
+    if len(rows) > limit:
+        print(f"... {len(rows) - limit} more rows")
+
+
 def _relation_sql(log_dir: Path) -> str:
     # One glob covers *.jsonl and *.jsonl.gz (DuckDB reads gzip by extension).
     pattern = str(log_dir / "*.jsonl*").replace("'", "''")
@@ -64,19 +80,21 @@ def main(argv: list[str] | None = None) -> int:
     con.execute(f"CREATE VIEW events AS SELECT * FROM {_relation_sql(log_dir)}")
 
     def run(sql: str) -> None:
-        rel = con.sql(sql)
+        # Cursor API, not the relation API: in duckdb 2.x a relation keeps no
+        # result between calls, so execute()+fetchall() is the portable form.
+        cur = con.execute(sql)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
         if args.format == "json":
             import json
-            cols = rel.columns
-            print(json.dumps([dict(zip(cols, row)) for row in rel.fetchall()],
-                             indent=2, default=str))
+            print(json.dumps([dict(zip(cols, r)) for r in rows], indent=2, default=str))
         else:
-            rel.show(max_rows=100)
+            _print_table(cols, rows)
 
     if args.sql:
         run(args.sql)
     else:
-        total = con.sql("SELECT count(*) FROM events").fetchone()[0]
+        total = con.execute("SELECT count(*) FROM events").fetchall()[0][0]
         print(f"events view: {total} rows from {log_dir}\n")
         for title, sql in _OVERVIEW:
             print(f"-- {title}")
