@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import os
 import secrets
 import socket
@@ -166,6 +167,9 @@ class Sensor:
         # domain from the beacon MAC so a leaked decoy id reveals nothing
         # about the signing key.
         self._decoy_key = hashlib.blake2b(self.secret, person=b"decoy-id", digest_size=32).digest()
+        # Separate domain again: an actor id must not be reversible to the key,
+        # and must not share a preimage space with decoy ids.
+        self._actor_key = hashlib.blake2b(self.secret, person=b"actor-id", digest_size=32).digest()
 
         # Hostnames that get the docs face: the origin's host plus any extras.
         hosts = {h.strip().lower() for h in config.site_hosts.split(",") if h.strip()}
@@ -181,6 +185,24 @@ class Sensor:
         sockname = transport.get_extra_info("sockname") if transport is not None else None
         key = _sock_key(sockname)
         return self.listeners.get(key, LISTENER_PUBLIC) if key else LISTENER_PUBLIC
+
+    def actor_id(self, ip: str, ja4: str | None, order_hash: str) -> tuple[str, str]:
+        """A stateless session key for one actor: (actor_id, basis).
+
+        Multiple requests from the same client should collapse to one entity
+        for recon->exploit->payload analysis, but this sensor keeps no session
+        table. So the id is an HMAC of (ip, strongest available fingerprint):
+        the JA4 TLS stack when the TLS front supplied one, else the header-order
+        hash. Same client, same id across restarts; the key never leaks through
+        the id. `basis` records which signal was used, since a ja4-keyed actor
+        and an order-keyed one are not comparable.
+        """
+        basis = "ja4" if ja4 else "header_order"
+        signal = ja4 or order_hash
+        token = hmac.new(
+            self._actor_key, f"{ip}|{basis}|{signal}".encode("utf-8"), hashlib.sha256
+        ).hexdigest()[:16]
+        return token, basis
 
     def face_of(self, request: web.Request, listener: str) -> str:
         """Which face serves this request: a persona port names its persona;
@@ -228,8 +250,11 @@ class Sensor:
 
     def emit(self, request: web.Request, kind: str, **fields) -> None:
         """Log an event tied to this request: all of a request's events share
-        its rid and face, so per-face analysis needs no join."""
+        its rid and face, so per-face analysis needs no join. The actor id ties
+        a client's requests into one session without a session table."""
         fields.setdefault("face", request.get("face"))
+        fields.setdefault("actor", request.get("actor"))
+        fields.setdefault("actor_basis", request.get("actor_basis"))
         self.log.emit(kind, rid=request.get("rid"), **fields)
 
     def trap(self, standard: str, ip: str, ua: str) -> str:
@@ -312,6 +337,9 @@ class Sensor:
         request["ja4"] = ja4
         request["listener"] = listener
         request["face"] = self.face_of(request, listener)
+        actor, actor_basis = self.actor_id(ip, ja4, fp.header_order_hash)
+        request["actor"] = actor
+        request["actor_basis"] = actor_basis
         persona = personas.get(listener)
 
         try:

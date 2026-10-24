@@ -204,6 +204,22 @@ async def run() -> int:
         check("all 18 surfaces served 200", all(v == 200 for v in surface_status.values()),
               str({k: v for k, v in surface_status.items() if v != 200}))
 
+        print("\nactor sessions")
+        actored = [r for r in requests if r.get("actor")]
+        check("every request carries an actor id", len(actored) == len(requests))
+        # Same (ip, ja4) collapses to one actor; different ip does not.
+        by_actor = {}
+        for r in actored:
+            by_actor.setdefault(r["actor"], set()).add((r["ip"], r["ja4"]))
+        check("one actor id per (ip, ja4)", all(len(v) == 1 for v in by_actor.values()),
+              str({k: v for k, v in by_actor.items() if len(v) != 1}))
+        front_actor = {r["actor"] for r in via_front}
+        public_actor = {r["actor"] for r in forged}
+        check("front client and forger are different actors",
+              front_actor and public_actor and front_actor.isdisjoint(public_actor))
+        check("front actor is keyed on ja4",
+              bool(via_front) and via_front[0]["actor_basis"] == "ja4")
+
         print("\npolicy-read attribution")
         by_std = {r["standard"] for r in reads}
         check("robots read recorded", "robots" in by_std)

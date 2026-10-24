@@ -200,6 +200,34 @@ def test_face_routing() -> None:
     check("missing Host gets the attack face", choose_face("", docs) == FACE_ATTACK)
 
 
+def test_actor_sessions() -> None:
+    print("\nactor sessions")
+    from mirage_crawl.server import build_app
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Config(secret_file=Path(tmp) / "secret", log_dir=Path(tmp) / "ev",
+                     ranges_file=Path("config/crawler_ranges.json"),
+                     front_socket=None, admin_socket=None)
+        sensor = build_app(cfg)["sensor"]
+        a, basis = sensor.actor_id("203.0.113.9", "t13d1516h2_ja4", "oh01")
+        b, _ = sensor.actor_id("203.0.113.9", "t13d1516h2_ja4", "oh99")
+        c, _ = sensor.actor_id("203.0.113.10", "t13d1516h2_ja4", "oh01")
+        check("ja4 is the basis when present", basis == "ja4")
+        check("same ip+ja4 is one actor regardless of header order", a == b)
+        check("different ip is a different actor", a != c)
+        d, dbasis = sensor.actor_id("203.0.113.9", None, "oh01")
+        e, _ = sensor.actor_id("203.0.113.9", None, "oh02")
+        check("header order is the basis with no ja4", dbasis == "header_order")
+        check("no-ja4 actor keyed on header order", d != e)
+        check("ja4 and header-order actors do not collide", a != d)
+        # Another sensor with a different secret derives different ids.
+        cfg2 = Config(secret_file=Path(tmp) / "secret2", log_dir=Path(tmp) / "ev2",
+                      ranges_file=Path("config/crawler_ranges.json"),
+                      front_socket=None, admin_socket=None)
+        other = build_app(cfg2)["sensor"]
+        f, _ = other.actor_id("203.0.113.9", "t13d1516h2_ja4", "oh01")
+        check("actor id is secret-scoped", a != f)
+
+
 def test_identity() -> None:
     print("\nidentity verification")
     ranges = RangeTable()
@@ -398,6 +426,7 @@ if __name__ == "__main__":
     test_canary_disguise()
     test_fingerprint()
     test_face_routing()
+    test_actor_sessions()
     test_identity()
     test_states()
     test_standard_kinds()
