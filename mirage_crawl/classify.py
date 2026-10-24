@@ -26,7 +26,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import eventlog
+from . import eventlog, policies
 
 STATE_COMPLIANT = "compliant"
 STATE_IGNORANT = "ignorant"
@@ -34,8 +34,13 @@ STATE_DEFIANT = "defiant"
 STATE_MINER = "miner"
 STATE_INDETERMINATE = "indeterminate"
 
-# Beacons that prove capability rather than policy reading.
-CAPABILITY_STANDARDS = {"js_beacon", "css_beacon", "hidden_link", "nofollow", "meta_noai"}
+_CAPABILITY_FLAGS = {
+    "js_beacon": "executes_js",
+    "css_beacon": "loads_css",
+    "hidden_link": "follows_hidden",
+    "nofollow": "follows_nofollow",
+    "meta_noai": "ignores_meta_noai",
+}
 
 
 @dataclass
@@ -57,6 +62,9 @@ class Profile:
     follows_hidden: bool = False
     follows_nofollow: bool = False
     ignores_meta_noai: bool = False
+    # Fetched an Allow path that sits inside a broader Disallow: the client
+    # applies longest-match, rather than refusing everything under a prefix.
+    respects_specificity: bool = False
 
     split_fleet_hits: int = 0
     max_read_to_fetch_delay: float = 0.0
@@ -127,6 +135,7 @@ class Profile:
             "follows_hidden_link": self.follows_hidden,
             "follows_nofollow": self.follows_nofollow,
             "ignores_meta_noai": self.ignores_meta_noai,
+            "respects_specificity": self.respects_specificity,
             "repeat_fetches": self.repeat_fetches,
             "wasteful_refetches": self.wasteful_refetches,
             "waste_ratio": round(self.waste_ratio, 3),
@@ -204,20 +213,18 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             p.addresses.add(event.get("ip", "-"))
             standard = event.get("standard", "")
 
-            if standard == "js_beacon":
-                p.executes_js = True
-            elif standard == "css_beacon":
-                p.loads_css = True
-            elif standard == "hidden_link":
-                p.follows_hidden = True
-            elif standard == "nofollow":
-                p.follows_nofollow = True
-            elif standard == "meta_noai":
-                p.ignores_meta_noai = True
-            elif standard not in ("stable_disallow_unlinked", "stable_allow_unlinked"):
-                # A policy-file beacon: proof the file was read AND mined.
+            kind = policies.kind_of(standard)
+            if kind == policies.KIND_CAPABILITY:
+                setattr(p, _CAPABILITY_FLAGS[standard], True)
+            elif kind == policies.KIND_PROHIBITION:
+                # The path appears only in a file that forbids it: proof the
+                # file was read AND mined for URLs.
                 p.standards_mined.add(standard)
                 p.standards_read.add(standard)
+            elif kind == policies.KIND_INVITATION:
+                p.standards_read.add(standard)
+            elif standard == "control_allow":
+                p.respects_specificity = True
 
             if event.get("disallowed"):
                 p.disallowed_paths.add(event.get("path", ""))
@@ -267,6 +274,6 @@ def standard_matrix(profiles: dict) -> dict[str, dict[str, int]]:
     for profile in profiles.values():
         name = profile.claimed_crawler or profile.user_agent[:40] or "-"
         for standard in profile.standards_read:
-            if standard not in CAPABILITY_STANDARDS:
+            if policies.kind_of(standard) in (policies.KIND_PROHIBITION, policies.KIND_INVITATION):
                 matrix[name][standard] += 1
     return {k: dict(v) for k, v in matrix.items()}

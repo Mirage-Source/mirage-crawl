@@ -54,6 +54,59 @@ TRAP_TEMPLATES: dict[str, str] = {
     "control_allow": "/public/allowed/{t}/notice.html",
 }
 
+# What fetching a beacon's trap path *means* depends on how the file that
+# leaked it presented the path. One table, read by the classifier, so the
+# meaning of a code is defined in exactly one place.
+#
+#   prohibition  the file forbids the path (Disallow, "not for training",
+#                a TDM reservation). Fetching it is mining a prohibition.
+#   invitation   the file offers the path without forbidding it (a sitemap
+#                entry, a policy link). Fetching it proves the file was read,
+#                nothing more -- following a sitemap is what sitemaps are for.
+#   capability   proves what the client can do (run JS, load CSS, see hidden
+#                links) rather than what it read.
+#   control      measures rule interpretation: control_allow is an Allow that
+#                is more specific than a covering Disallow, so fetching it shows
+#                the client applies longest-match correctly.
+KIND_PROHIBITION = "prohibition"
+KIND_INVITATION = "invitation"
+KIND_CAPABILITY = "capability"
+KIND_CONTROL = "control"
+
+STANDARD_KIND: dict[str, str] = {
+    "robots": KIND_PROHIBITION,
+    "robots_wellknown": KIND_PROHIBITION,
+    "llms": KIND_PROHIBITION,
+    "llms_full": KIND_PROHIBITION,
+    "ai": KIND_PROHIBITION,
+    "ai_wellknown": KIND_PROHIBITION,
+    "tdm_wellknown": KIND_PROHIBITION,
+    "tdm_root": KIND_PROHIBITION,
+    "sitemap": KIND_INVITATION,
+    "sitemap_index": KIND_INVITATION,
+    "security": KIND_INVITATION,
+    "security_root": KIND_INVITATION,
+    "humans": KIND_INVITATION,
+    "ai_plugin": KIND_INVITATION,
+    "dnt_policy": KIND_INVITATION,
+    "gpc": KIND_INVITATION,
+    "ads": KIND_INVITATION,
+    "noai_file": KIND_PROHIBITION,
+    "meta_noai": KIND_CAPABILITY,
+    "nofollow": KIND_CAPABILITY,
+    "hidden_link": KIND_CAPABILITY,
+    "js_beacon": KIND_CAPABILITY,
+    "css_beacon": KIND_CAPABILITY,
+    # Reserved code, never minted today. A linked page under a Disallow.
+    "linked_disallow": KIND_CONTROL,
+    "control_allow": KIND_CONTROL,
+}
+
+
+def kind_of(standard: str) -> str | None:
+    return STANDARD_KIND.get(standard)
+
+
 # Stable paths, identical for every requester. A fleet that shares one cached
 # robots.txt still trips these, and they survive caching proxies that would
 # otherwise mask a per-request token.

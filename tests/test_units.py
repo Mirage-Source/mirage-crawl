@@ -8,6 +8,7 @@ have to be driven directly.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -18,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mirage_crawl import beacons, policies  # noqa: E402
 from mirage_crawl.config import Config  # noqa: E402
 from mirage_crawl.classify import (  # noqa: E402
-    STATE_COMPLIANT, STATE_DEFIANT, STATE_IGNORANT, STATE_MINER, Profile,
+    STATE_COMPLIANT, STATE_DEFIANT, STATE_IGNORANT, STATE_MINER, Profile, build_profiles,
+    standard_matrix,
 )
 from mirage_crawl.fingerprint import build, classify_ua  # noqa: E402
 from mirage_crawl.identity import (  # noqa: E402
@@ -204,6 +206,53 @@ def test_states() -> None:
     check("no divide by zero", Profile("ua", None).waste_ratio == 0.0)
 
 
+def profiles_from(events: list[dict]) -> dict:
+    """Run the classifier over a synthetic event log."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(Path(tmp) / "2026-01-01.jsonl", "w", encoding="utf-8") as handle:
+            for i, event in enumerate(events):
+                event.setdefault("ts", f"2026-01-01T00:00:{i:02d}.000+00:00")
+                handle.write(json.dumps(event) + "\n")
+        return build_profiles(tmp)
+
+
+def hit(ua: str, standard: str, path: str = "/x") -> dict:
+    return {"kind": "trap_hit", "ua": ua, "ip": "1.1.1.1", "standard": standard, "path": path}
+
+
+def test_standard_kinds() -> None:
+    print("\nbeacon kinds")
+    kinds = {"prohibition", "invitation", "capability", "control"}
+    check("every standard code has a kind",
+          set(policies.STANDARD_KIND) == set(beacons.STANDARD_CODES),
+          str(set(beacons.STANDARD_CODES) ^ set(policies.STANDARD_KIND)))
+    check("kinds are from the fixed set", set(policies.STANDARD_KIND.values()) <= kinds)
+    check("sitemap is an invitation", policies.STANDARD_KIND["sitemap"] == "invitation")
+    check("robots is a prohibition", policies.STANDARD_KIND["robots"] == "prohibition")
+
+    def one(events):
+        return next(iter(profiles_from(events).values()))
+
+    sitemap = one([hit("SiteBot", "sitemap")])
+    check("sitemap follower is not a miner", sitemap.state != STATE_MINER, sitemap.state)
+    check("sitemap follow records a read", "sitemap" in sitemap.standards_read)
+    check("sitemap follow is not mining", not sitemap.standards_mined)
+
+    robots = one([hit("MineBot", "robots")])
+    check("robots trap fetch is mining", robots.state == STATE_MINER)
+
+    control = one([hit("CtlBot", "control_allow")])
+    check("control allow is not mining", control.state != STATE_MINER, control.state)
+    check("control allow sets respects_specificity", control.respects_specificity)
+
+    css = one([hit("RenderBot", "css_beacon")])
+    check("capability beacon sets its flag", css.loads_css and css.state != STATE_MINER)
+    matrix = standard_matrix(profiles_from([hit("RenderBot", "css_beacon"), hit("SiteBot", "sitemap")]))
+    check("capability beacons stay out of the matrix",
+          all("css_beacon" not in row for row in matrix.values()))
+    check("invitation reads appear in the matrix", matrix.get("SiteBot", {}).get("sitemap") == 1)
+
+
 def test_policies() -> None:
     print("\npolicy surfaces")
     secret = b"s" * 32
@@ -231,6 +280,7 @@ if __name__ == "__main__":
     test_fingerprint()
     test_identity()
     test_states()
+    test_standard_kinds()
     test_policies()
     if failures:
         print("\nFAILURES: " + ", ".join(failures))
