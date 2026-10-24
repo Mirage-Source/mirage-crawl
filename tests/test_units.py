@@ -200,6 +200,22 @@ def test_face_routing() -> None:
     check("missing Host gets the attack face", choose_face("", docs) == FACE_ATTACK)
 
 
+def test_sock_key() -> None:
+    print("\nlistener socket keying")
+    from mirage_crawl.server import _sock_key
+    # A listener bound to 0.0.0.0 and a connection accepted on a concrete
+    # interface IP must map to the same key -- otherwise persona ports bound
+    # to 0.0.0.0 in production are never recognised and fall through to the
+    # public handler (the IP in an accepted connection's sockname is the
+    # interface it arrived on, not the wildcard the socket was bound to).
+    check("tcp key is bind-address independent",
+          _sock_key(("0.0.0.0", 11434)) == _sock_key(("172.18.0.3", 11434)))
+    check("tcp key still distinguishes ports",
+          _sock_key(("0.0.0.0", 11434)) != _sock_key(("0.0.0.0", 8265)))
+    check("unix socket keyed by absolute path",
+          _sock_key("/app/data/front.sock") == ("unix", "/app/data/front.sock"))
+
+
 def test_actor_sessions() -> None:
     print("\nactor sessions")
     from mirage_crawl.server import build_app
@@ -426,6 +442,7 @@ if __name__ == "__main__":
     test_canary_disguise()
     test_fingerprint()
     test_face_routing()
+    test_sock_key()
     test_actor_sessions()
     test_identity()
     test_states()

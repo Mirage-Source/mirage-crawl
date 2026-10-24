@@ -93,7 +93,13 @@ def _sock_key(sockname) -> tuple | None:
     if isinstance(sockname, (str, bytes)):
         return ("unix", os.path.abspath(os.fsdecode(sockname)))
     if isinstance(sockname, tuple) and len(sockname) >= 2:
-        return ("tcp", sockname[0], sockname[1])
+        # Key by port only, not (ip, port): a socket bound to 0.0.0.0 reports
+        # that wildcard as its own sockname, but a connection accepted on it
+        # reports the concrete interface IP it arrived on. Keying on the full
+        # tuple would never match those, so a persona port bound to 0.0.0.0 in
+        # production falls through to the public handler. Every listener we
+        # register has a distinct port, so the port alone identifies it.
+        return ("tcp", sockname[1])
     return None
 
 
