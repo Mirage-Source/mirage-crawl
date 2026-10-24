@@ -39,6 +39,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from . import decode, wallets as wallet_check
+
 CATEGORY_CRYPTO = "crypto_mining"
 CATEGORY_GPU = "gpu_ml"
 CATEGORY_LLM = "llm_inference"
@@ -213,7 +215,13 @@ BITCOIN_RE = re.compile(r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34
 ETHEREUM_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 STRATUM_RE = re.compile(r"stratum\+(?:tcp|ssl)://[^\s\"'<>]+", re.I)
 URL_RE = re.compile(r"https?://[^\s\"'<>\\]{4,200}", re.I)
-JNDI_RE = re.compile(r"\$\{jndi:(?:ldap|rmi|dns|ldaps)://[^}]{1,200}\}", re.I)
+JNDI_RE = re.compile(
+    r"\$\{jndi:(?:ldaps?|rmi|dns|iiop|corba|nds|nis|https?)://[^}]{1,200}\}", re.I
+)
+# Shellshock: a function definition at the start of a value, "() { ...; }".
+# Anchored so "function() { return x; }" in a script body does not match.
+SHELLSHOCK_RE = re.compile(r"(?:^|[\s=:'\"])\(\)\s*\{[^}]*;\s*\}")
+B64_DEPTH = 2
 METADATA_RE = re.compile(r"169\.254\.169\.254|metadata\.google\.internal", re.I)
 
 POOL_HOSTS = (
@@ -242,14 +250,31 @@ class PayloadFindings:
     miners: list[str] = field(default_factory=list)
     downloaders: list[str] = field(default_factory=list)
     jndi: list[str] = field(default_factory=list)
+    jndi_obfuscated: bool = False
+    shellshock: bool = False
     metadata_ssrf: bool = False
-    decoded_layers: int = 0
+    decoded_layers: int = 0  # base64 depth at which something was found
+    url_decoded_layers: int = 0
 
     def any(self) -> bool:
         return bool(
             self.wallets or self.pools or self.urls or self.miners
-            or self.downloaders or self.jndi or self.metadata_ssrf
+            or self.downloaders or self.jndi or self.metadata_ssrf or self.shellshock
         )
+
+    def merge(self, other: "PayloadFindings") -> None:
+        for currency, addresses in other.wallets.items():
+            self.wallets[currency] = _dedupe(self.wallets.get(currency, []) + addresses)[:5]
+        self.pools = _dedupe(self.pools + other.pools)[:10]
+        self.urls = _dedupe(self.urls + other.urls)[:10]
+        self.miners = _dedupe(self.miners + other.miners)
+        self.downloaders = _dedupe(self.downloaders + other.downloaders)[:5]
+        self.jndi = _dedupe(self.jndi + other.jndi)[:5]
+        self.jndi_obfuscated = self.jndi_obfuscated or other.jndi_obfuscated
+        self.shellshock = self.shellshock or other.shellshock
+        self.metadata_ssrf = self.metadata_ssrf or other.metadata_ssrf
+        self.decoded_layers = max(self.decoded_layers, other.decoded_layers)
+        self.url_decoded_layers = max(self.url_decoded_layers, other.url_decoded_layers)
 
     def as_dict(self) -> dict:
         return {
@@ -259,8 +284,11 @@ class PayloadFindings:
             "miners": self.miners,
             "downloaders": self.downloaders,
             "jndi": self.jndi[:5],
+            "jndi_obfuscated": self.jndi_obfuscated,
+            "shellshock": self.shellshock,
             "metadata_ssrf": self.metadata_ssrf,
             "decoded_layers": self.decoded_layers,
+            "url_decoded_layers": self.url_decoded_layers,
         }
 
 
@@ -271,64 +299,69 @@ def _dedupe(values) -> list[str]:
     return list(seen)
 
 
-def scan_payload(text: str, _depth: int = 0) -> PayloadFindings:
-    """Extract hard indicators from a request body, path or query string.
+def _scan_layer(text: str, urls: bool) -> PayloadFindings:
+    """Indicators in one already-decoded form of the text."""
+    findings = PayloadFindings()
+    lowered = text.lower()
 
-    Recurses once through base64, because miner configuration is routinely
-    wrapped in a single base64 layer inside a JSON field or a shell one-liner.
+    monero = _dedupe(MONERO_RE.findall(text))
+    bitcoin = [a for a in _dedupe(BITCOIN_RE.findall(text)) if wallet_check.valid_bitcoin(a)]
+    ethereum = _dedupe(ETHEREUM_RE.findall(text))
+    for currency, found in (("monero", monero), ("bitcoin", bitcoin), ("ethereum", ethereum)):
+        if found:
+            findings.wallets[currency] = found[:5]
+
+    pools = _dedupe(STRATUM_RE.findall(text))
+    pools.extend(host for host in POOL_HOSTS if host in lowered)
+    findings.pools = _dedupe(pools)[:10]
+
+    if urls:
+        findings.urls = _dedupe(URL_RE.findall(text))[:10]
+    findings.miners = [m for m in MINER_BINARIES if m in lowered]
+    findings.downloaders = _dedupe(DOWNLOADER_RE.findall(text))[:5]
+    findings.metadata_ssrf = bool(METADATA_RE.search(text))
+    findings.shellshock = bool(SHELLSHOCK_RE.search(text))
+
+    plain_jndi = JNDI_RE.findall(text)
+    clear = decode.deobfuscate_log4j(text)
+    found_jndi = JNDI_RE.findall(clear) if clear != text else plain_jndi
+    findings.jndi = _dedupe(found_jndi)[:5]
+    findings.jndi_obfuscated = bool(found_jndi) and not plain_jndi
+    return findings
+
+
+def scan_payload(text: str, _depth: int = 0, urls: bool = True) -> PayloadFindings:
+    """Extract hard indicators from a request body, path, query or header value.
+
+    Every percent-decoding layer (up to three) is scanned, Log4j lookups are
+    collapsed before matching, and base64 blobs are decoded up to two layers
+    deep, because miner configuration is routinely wrapped in base64 inside
+    a JSON field or a shell one-liner. `urls=False` skips URL extraction, for
+    places where URLs are normal (a crawler's User-Agent, a Referer).
     """
     findings = PayloadFindings()
     if not text:
         return findings
 
-    lowered = text.lower()
+    layers = decode.url_layers(text)
+    findings.url_decoded_layers = len(layers) - 1
+    for layer in layers:
+        findings.merge(_scan_layer(layer, urls))
 
-    wallets: dict[str, list[str]] = {}
-    monero = _dedupe(MONERO_RE.findall(text))
-    bitcoin = _dedupe(BITCOIN_RE.findall(text))
-    ethereum = _dedupe(ETHEREUM_RE.findall(text))
-    if monero:
-        wallets["monero"] = monero[:5]
-    if bitcoin:
-        wallets["bitcoin"] = bitcoin[:5]
-    if ethereum:
-        wallets["ethereum"] = ethereum[:5]
-    findings.wallets = wallets
-
-    pools = _dedupe(STRATUM_RE.findall(text))
-    for host in POOL_HOSTS:
-        if host in lowered:
-            pools.append(host)
-    findings.pools = _dedupe(pools)[:10]
-
-    findings.urls = _dedupe(URL_RE.findall(text))[:10]
-    findings.miners = [m for m in MINER_BINARIES if m in lowered]
-    findings.downloaders = _dedupe(DOWNLOADER_RE.findall(text))[:5]
-    findings.jndi = _dedupe(JNDI_RE.findall(text))[:5]
-    findings.metadata_ssrf = bool(METADATA_RE.search(text))
-
-    if _depth == 0:
-        for blob in B64_RE.findall(text)[:5]:
+    if _depth < B64_DEPTH:
+        for blob in _dedupe(b for layer in layers for b in B64_RE.findall(layer))[:5]:
             try:
                 decoded = base64.b64decode(blob + "=" * (-len(blob) % 4), validate=False)
             except (binascii.Error, ValueError):
                 continue
-            try:
-                decoded_text = decoded.decode("utf-8", "ignore")
-            except Exception:
-                continue
+            decoded_text = decoded.decode("utf-8", "ignore")
             if len(decoded_text) < 8:
                 continue
-            inner = scan_payload(decoded_text, _depth=1)
+            inner = scan_payload(decoded_text, _depth=_depth + 1, urls=urls)
             if inner.any():
-                findings.decoded_layers += 1
-                for currency, addresses in inner.wallets.items():
-                    findings.wallets.setdefault(currency, []).extend(addresses)
-                findings.pools = _dedupe(findings.pools + inner.pools)[:10]
-                findings.urls = _dedupe(findings.urls + inner.urls)[:10]
-                findings.miners = _dedupe(findings.miners + inner.miners)
-                findings.downloaders = _dedupe(findings.downloaders + inner.downloaders)
-                findings.metadata_ssrf = findings.metadata_ssrf or inner.metadata_ssrf
+                inner.decoded_layers += 1
+                inner.url_decoded_layers = 0
+                findings.merge(inner)
 
     return findings
 
