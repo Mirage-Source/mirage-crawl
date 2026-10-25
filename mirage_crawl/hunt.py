@@ -220,7 +220,11 @@ MONERO_RE = re.compile(r"\b[48][0-9AB][1-9A-HJ-NP-Za-km-z]{93}\b")
 BITCOIN_RE = re.compile(r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
 ETHEREUM_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 STRATUM_RE = re.compile(r"stratum\+(?:tcp|ssl)://[^\s\"'<>]+", re.I)
-URL_RE = re.compile(r"https?://[^\s\"'<>\\]{4,200}", re.I)
+# Payload URLs mostly arrive inside shell one-liners, so shell punctuation
+# (; | ) and backtick) ends a URL: "(wget -qO- https://h/sh || curl ...)"
+# must yield https://h/sh, not https://h/sh) or a URL swallowing the next
+# command after a ';'.
+URL_RE = re.compile(r"https?://[^\s\"'<>\\;|)`]{4,200}", re.I)
 JNDI_RE = re.compile(
     r"\$\{jndi:(?:ldaps?|rmi|dns|iiop|corba|nds|nis|https?)://[^}]{1,200}\}", re.I
 )
@@ -242,8 +246,10 @@ MINER_BINARIES = (
     "ethminer", "bfgminer", "cgminer", "kryptex", "nicehash", "randomx",
 )
 
+# "(?!/)": "curl/8.14.1" and "Wget/1.21" are product tokens in a User-Agent
+# (the tool identifying itself), not a download command.
 DOWNLOADER_RE = re.compile(
-    r"\b(?:curl|wget|fetch|tftp|certutil|bitsadmin|Invoke-WebRequest|iwr)\b", re.I
+    r"\b(?:curl|wget|fetch|tftp|certutil|bitsadmin|Invoke-WebRequest|iwr)\b(?!/)", re.I
 )
 B64_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 

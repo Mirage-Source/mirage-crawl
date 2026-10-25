@@ -128,8 +128,9 @@ def body_fields(body: Body | None, log_bytes: int) -> dict:
 
 # Headers where a URL is normal rather than a payload: a crawler's User-Agent
 # carries its info page, Referer and Origin point at pages. Exploit markers
-# (JNDI, Shellshock, wallets) are still looked for in them.
-_URL_NORMAL_HEADERS = {"user-agent", "referer", "origin", "host"}
+# (JNDI, Shellshock, wallets) are still looked for in them. Signature-Agent
+# is Web Bot Auth: a signing crawler names its key directory URL there.
+_URL_NORMAL_HEADERS = {"user-agent", "referer", "origin", "host", "signature-agent"}
 
 
 def scan_request(
@@ -144,7 +145,9 @@ def scan_request(
     Returns merged findings and the locations ("path", "query",
     "header:<Name>", "body") where anything was found.
     """
-    parts: list[tuple[str, str, bool]] = [("path", raw_path, True)]
+    # An absolute-form target ("GET http://api.ipify.org/") is a proxy probe:
+    # the URL is where the client wants relayed, not a payload it delivers.
+    parts: list[tuple[str, str, bool]] = [("path", raw_path, raw_path.startswith("/"))]
     if raw_query:
         parts.append(("query", raw_query, True))
     parts.extend(
