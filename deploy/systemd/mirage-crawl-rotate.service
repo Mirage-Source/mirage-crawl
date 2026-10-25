@@ -1,0 +1,6 @@
+[Unit]
+Description=Compress old mirage-crawl event logs (research corpus kept, not deleted)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/mirage/mirage-crawl/scripts/rotate_logs.py /var/lib/docker/volumes/mirage-crawl_crawl_data/_data/events --compress-after 2 --delete-after -1

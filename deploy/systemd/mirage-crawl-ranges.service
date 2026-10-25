@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh published crawler IP ranges for mirage-crawl
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mirage/mirage-crawl/deploy/refresh-ranges.sh
