@@ -349,6 +349,16 @@ DNS lookups for FCrDNS identity verification (`CRAWL_VERIFY_IDENTITY=false`
 turns those off too). Payload URLs, pool hosts and C2 addresses are recorded as
 strings and left alone.
 
+**Honeytokens only see use against this host.** The planted credentials are
+detected when they come back *here*. Most credential stealers validate a key
+against the real service first (AWS STS, the forge, the payment API), and that
+use is invisible to the sensor: no external canary service is wired in, which
+is what keeps the outbound claim above true. Expect the git credential, whose
+remote points at this host, to be the shape that returns most; expect few
+replays of the others. A careful harvester can also reject shapes offline (a
+real forge token carries a checksum these do not). So a zero
+`honeytokens_used` count means "not replayed here", never "not used".
+
 **Cached policy files blunt per-request beacons.** A crawler that fetched
 `robots.txt` yesterday and crawls today carries a token from yesterday — which
 is fine, and `delay_seconds` measures exactly that — but a fleet sharing one
