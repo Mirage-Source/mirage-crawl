@@ -19,7 +19,7 @@
       "https://openai.com/chatgpt-user.json"
     ],
     "Anthropic": [
-      "https://www.anthropic.com/anthropic-crawler.json"
+      "https://claude.com/crawling/bots.json"
     ],
     "Perplexity": [
       "https://www.perplexity.com/perplexitybot.json",
@@ -32,7 +32,7 @@
       "https://developer.amazon.com/amazonbot.json"
     ],
     "DuckDuckGo": [
-      "https://duckduckgo.com/duckduckgo-help-pages/results/duckduckbot/"
+      "https://duckduckgo.com/duckduckbot.json"
     ],
     "Google": [
       "https://developers.google.com/static/search/apis/ipranges/googlebot.json",
