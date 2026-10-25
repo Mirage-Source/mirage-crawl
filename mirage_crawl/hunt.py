@@ -110,6 +110,35 @@ _COMFY_STATS = json.dumps(
     }
 )
 _TRITON_READY = ""
+# Honeytoken decoys. {{ht:<kind>}} is filled per requester at serve time (see
+# honeytokens.fill); the file layout is identical for everyone, only the opaque
+# credential strings differ. Fake and inert: nothing here is ever used by us.
+_DOTENV = (
+    "APP_NAME=api\nAPP_ENV=production\nAPP_DEBUG=false\n"
+    "DB_HOST=10.0.4.12\nDB_PORT=5432\nDB_DATABASE=app\nDB_USERNAME=app\n"
+    "DB_PASSWORD={{ht:db_password}}\n"
+    "AWS_ACCESS_KEY_ID={{ht:aws_access_key}}\nAWS_SECRET_ACCESS_KEY={{ht:aws_secret}}\n"
+    "AWS_DEFAULT_REGION=us-east-1\nPAYMENTS_API_KEY={{ht:api_key}}\n"
+)
+_AWS_CREDENTIALS = (
+    "[default]\naws_access_key_id = {{ht:aws_access_key}}\n"
+    "aws_secret_access_key = {{ht:aws_secret}}\n"
+)
+# {{host}} is our own hostname: self-detection only sees a credential that is
+# tried against this host, and pointing at a real forge would send attacker
+# traffic to a third party.
+_GIT_CREDENTIALS = "https://deploy:{{ht:git_credentials}}@{{host}}\n"
+_GIT_CONFIG = (
+    "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n"
+    "[remote \"origin\"]\n\turl = https://deploy:{{ht:git_credentials}}@{{host}}/infra/api.git\n"
+    "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+    "[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n"
+)
+_CONFIG_JSON = (
+    '{"database": {"host": "10.0.4.12", "user": "app", "password": "{{ht:db_password}}"},'
+    ' "aws": {"accessKeyId": "{{ht:aws_access_key}}", "secretAccessKey": "{{ht:aws_secret}}"},'
+    ' "apiKey": "{{ht:api_key}}"}'
+)
 _MLFLOW_EXPERIMENTS = json.dumps({"experiments": [{"experiment_id": "0", "name": "Default"}]})
 
 PROBES: tuple[Probe, ...] = (
@@ -191,15 +220,22 @@ PROBES: tuple[Probe, ...] = (
     # -- Cloud credentials that lead to GPU instances ----------------------
     _p(r"^/\.env(\.|$)|^/\.env$", "dotenv", "application .env", CATEGORY_CLOUD,
        "harvest cloud keys, then rent GPU capacity on the victim's account",
-       ("T1552.001", "T1078.004")),
+       ("T1552.001", "T1078.004"), _DOTENV, "text/plain"),
     _p(r"^/\.aws/credentials|^/\.aws/config", "aws", "AWS credentials file", CATEGORY_CLOUD,
-       "direct cloud account takeover", ("T1552.001", "T1078.004")),
+       "direct cloud account takeover", ("T1552.001", "T1078.004"), _AWS_CREDENTIALS, "text/plain"),
+    _p(r"^/\.git-credentials$", "git", "git credential store", CATEGORY_CLOUD,
+       "take over a source-control account", ("T1552.001", "T1078.004"), _GIT_CREDENTIALS,
+       "text/plain"),
+    # config before HEAD: HEAD must not be answered with a config body.
+    _p(r"^/\.git/config$", "git", "exposed .git", CATEGORY_CLOUD,
+       "recover source and embedded secrets", ("T1552.001",), _GIT_CONFIG, "text/plain"),
     _p(r"^/\.git/(config|HEAD)", "git", "exposed .git", CATEGORY_CLOUD,
        "recover source and embedded secrets", ("T1552.001",)),
     _p(r"^/actuator/(env|heapdump|configprops)", "spring", "Spring Boot Actuator",
        CATEGORY_CLOUD, "dump configuration including credentials", ("T1552.001",)),
     _p(r"^/(config\.json|secrets\.json|credentials\.json|appsettings\.json)$", "config",
-       "configuration file", CATEGORY_CLOUD, "harvest embedded secrets", ("T1552.001",)),
+       "configuration file", CATEGORY_CLOUD, "harvest embedded secrets", ("T1552.001",),
+       _CONFIG_JSON),
 
     # -- Known RCE probes used to deliver miners ---------------------------
     _p(r"^/vendor/phpunit/", "phpunit", "PHPUnit eval-stdin", CATEGORY_EXPLOIT,

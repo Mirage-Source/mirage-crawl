@@ -79,6 +79,10 @@ class Session:
     tools: set[str] = field(default_factory=set)
     oast: set[str] = field(default_factory=set)
     exploits: set[str] = field(default_factory=set)
+    # Honeytoken kinds issued to / replayed by this actor. A replay is a
+    # payload by definition: someone acted on a credential we planted.
+    honeytokens_issued: set[str] = field(default_factory=set)
+    honeytokens_used: set[str] = field(default_factory=set)
     mitre: set[str] = field(default_factory=set)
 
     wallets: dict[str, set[str]] = field(default_factory=dict)
@@ -100,6 +104,7 @@ class Session:
             self.wallets or self.pools or self.payload_urls or self.miners
             or self.credential_attempts
             or self.attack_classes
+            or self.honeytokens_used
             or (self.web_attacks & _PAYLOAD_ATTACKS)
         )
 
@@ -164,6 +169,7 @@ class Session:
             self.cves.update(a["cve"] for a in e.get("attacks") or () if a.get("cve"))
             self.tools.update(t["name"] for t in e.get("tools") or ())
             self.oast.update(e.get("oast") or ())
+            self.honeytokens_used.update(h["kind"] for h in e.get("honeytokens") or ())
         elif kind == eventlog.EVENT_POLICY_READ:
             if e.get("standard"):
                 self.standards_read.add(e["standard"])
@@ -180,6 +186,7 @@ class Session:
                 self.web_attacks.add(e["web_attack"])
             if e.get("decoy_served"):
                 self.decoy_served = True
+            self.honeytokens_issued.update(h["kind"] for h in e.get("honeytokens_issued") or ())
             if e.get("stage"):
                 self.walked_multistage = True
             self._absorb_indicators(e.get("indicators"))
@@ -226,6 +233,8 @@ class Session:
             "tools": sorted(self.tools),
             "oast": sorted(self.oast),
             "exploits": sorted(self.exploits),
+            "honeytokens_issued": sorted(self.honeytokens_issued),
+            "honeytokens_used": sorted(self.honeytokens_used),
             "mitre": sorted(self.mitre),
             "wallets": {k: sorted(v) for k, v in self.wallets.items()},
             "pools": sorted(self.pools),

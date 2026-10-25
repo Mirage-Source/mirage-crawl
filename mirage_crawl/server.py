@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from . import attacks, beacons, capture, credentials, eventlog, hunt, personas, policies
+from . import attacks, beacons, capture, credentials, eventlog, honeytokens, hunt, personas, policies
 from .config import Config
 from .fingerprint import build as build_fingerprint
 from .identity import RangeTable, VerifierCache
@@ -343,6 +343,14 @@ class Sensor:
             ).event_fields()
         except Exception:
             analysis = {"attacks": None, "tools": None, "oast": None, "classify_error": True}
+        # Our own planted credentials coming back. Same guard: never cost the event.
+        try:
+            analysis["honeytokens"] = honeytokens.scan_request(
+                self.secret, raw_path, raw_query, headers,
+                request["body"].data if request["body"] else None, ip,
+            ) or None
+        except Exception:
+            analysis["honeytokens"] = None
         version =f"{request.version.major}.{request.version.minor}"
         fp = build_fingerprint(user_agent=ua, raw_header_names=raw_names, http_version=version)
         request["fp"] = fp
@@ -700,6 +708,11 @@ class Sensor:
 
         findings: hunt.PayloadFindings = request["findings"]
 
+        # Honeytokens are minted for this requester only when decoys are on.
+        decoy_text, issued = probe.decoy, []
+        if probe.decoy is not None and self.config.hunt_decoys:
+            decoy_text, issued = honeytokens.fill(self.secret, probe.decoy, ip, host=self._own_host)
+
         self.emit(
             request,
             eventlog.EVENT_HUNT,
@@ -720,11 +733,12 @@ class Sensor:
             body_sha256=capture.body_fields(captured, 0).get("body_sha256"),
             indicators=findings.as_dict() if findings.any() else None,
             decoy_served=bool(probe.decoy is not None and self.config.hunt_decoys),
+            honeytokens_issued=issued or None,
         )
 
         if probe.decoy is not None and self.config.hunt_decoys:
             return web.Response(
-                text=probe.decoy,
+                text=decoy_text,
                 content_type=probe.content_type,
                 headers={"Cache-Control": "no-store"},
             )
