@@ -70,6 +70,24 @@ services:
       - crawl
     restart: unless-stopped
 
+  # Run only by the systemd timer in deploy/dataset-export/.
+  export:
+    profiles: ["export"]
+    build:
+      context: .
+      dockerfile: Dockerfile.export
+    # Only this service may load .env.export (the R2 write token).
+    env_file: .env.export
+    volumes:
+      # Read-only: the exporter must never be able to write the beacon key.
+      - crawl_data:/app/data:ro
+    cpu_shares: 128
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
 volumes:
   crawl_data:
   crawl_config:

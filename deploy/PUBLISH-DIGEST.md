@@ -47,4 +47,5 @@ Then trigger once from the Actions tab (**Run workflow**) to confirm it
 publishes `crawl-dataset/latest/REPORT.md` on `gh-pages`.
 
 > The digest is cheap (flat-file pass, no DB) and small (aggregates + a bounded
-> follow-up list only) — raw request logs never leave the box.
+> follow-up list only) — raw request logs leave the box only through the
+> sanitized R2 export (`scripts/export_r2.py`, `mirage_crawl/publish.py`).

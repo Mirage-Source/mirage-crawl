@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily mirage-crawl export (publishes only days not yet in R2)
+
+[Timer]
+# A day counts as finished an hour after midnight UTC; a missed run is picked
+# up by the next one.
+OnCalendar=*-*-* 01:30:00 UTC
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

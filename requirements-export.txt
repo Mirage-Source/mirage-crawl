@@ -1,0 +1,2 @@
+# scripts/export_r2.py only (Dockerfile.export); the sensor itself does not need it.
+boto3==1.43.118

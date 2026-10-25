@@ -37,6 +37,14 @@ they're made, not backfilled.
   sensor serve *different substantive rules* to different clients, that's a
   line this project has explicitly committed not to cross — flag it rather
   than shipping it.
+- **Anything new the sensor mints must be taught to `publish.py`.** The
+  daily R2 export (`scripts/export_r2.py`) publishes raw events after
+  `mirage_crawl/publish.py` removes every beacon and honeytoken it can verify.
+  A new token type, a new field carrying one, or a new encoding it can hide in
+  is published in the clear until the sanitizer and `tests/test_publish.py`
+  cover it. The exporter also must never call `Config.load_secret()` (it
+  creates a key when the file is missing); it reads the key with
+  `read_secret()` from a read-only mount.
 - **`config/crawler_ranges.json` can go stale.** A stale (not missing) range
   file is the dangerous state — addresses an operator added after the
   snapshot get called impersonators. Don't treat a range file's mere presence

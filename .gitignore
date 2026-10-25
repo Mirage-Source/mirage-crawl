@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 deploy/certs/*.pem
 deploy/certs/*.key
+.env.export

@@ -1,0 +1,16 @@
+# Daily sanitized export of the event log to R2 (scripts/export_r2.py). Run by
+# deploy/dataset-export/mirage-crawl-export.timer, never as a service: see the
+# `export` service in docker-compose.yml. Stdlib-only apart from boto3; aiohttp
+# and the server code are not needed.
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY requirements-export.txt .
+RUN pip install --no-cache-dir -r requirements-export.txt
+COPY mirage_crawl ./mirage_crawl
+COPY scripts/export_r2.py ./scripts/
+
+# Same uid as the sensor (999), so the 0600 beacon key is readable without root.
+USER 999:999
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["python", "scripts/export_r2.py", "--events", "/app/data/events", "--secret-file", "/app/data/beacon.secret"]

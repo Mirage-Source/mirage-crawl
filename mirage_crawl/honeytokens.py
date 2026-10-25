@@ -128,11 +128,16 @@ _HEX = "0123456789abcdef"
 _ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
+def aws_secret_for(secret: bytes, payload: str) -> str:
+    """The secret access key served alongside the key ID AKIA<payload>."""
+    raw = hmac.new(_key(secret), f"aws-secret:{payload}".encode(), hashlib.blake2b).digest()[:30]
+    return base64.b64encode(raw).decode("ascii")
+
+
 def render(secret: bytes, kind: str, ip: str, now: float | None = None) -> Credential:
     p = mint(secret, kind, ip, now)
     if kind == "aws_access_key":
-        raw = hmac.new(_key(secret), f"aws-secret:{p}".encode(), hashlib.blake2b).digest()[:30]
-        return Credential(kind, "AKIA" + p, base64.b64encode(raw).decode("ascii"), p)
+        return Credential(kind, "AKIA" + p, aws_secret_for(secret, p), p)
     if kind == "api_key":
         return Credential(kind, "sk_live_" + p.lower() + _filler(secret, kind, p, 8, _HEX), None, p)
     if kind == "db_password":

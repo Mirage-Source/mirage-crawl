@@ -1,0 +1,10 @@
+[Unit]
+Description=Publish finished days of the mirage-crawl event log, sanitized, to R2
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mirage/mirage-crawl
+ExecStart=/usr/bin/docker compose --profile export run --rm --build export
+TimeoutStartSec=1h
