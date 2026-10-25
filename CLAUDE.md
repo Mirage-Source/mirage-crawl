@@ -17,11 +17,16 @@ they're made, not backfilled.
 - **The beacon signing key (`data/beacon.secret`) must stay stable across
   restarts.** Rotating or losing it invalidates every token minted so far —
   in-flight trap hits stop verifying and go undetected, not loudly rejected.
-  Never regenerate it as a side effect of unrelated config changes.
+  The honeytoken key is derived from it too, so rotating it also orphans
+  every planted credential already served: a replay of one would no longer
+  be recognised. Never regenerate it as a side effect of unrelated config
+  changes.
 - **`STANDARD_CODES` in `beacons.py` is append-only.** Renumbering an existing
   code silently changes what historical tokens mean — a token minted last
   week would decode to a different policy standard after the change. Add new
-  codes at the end; never reuse or reassign one.
+  codes at the end; never reuse or reassign one. The same holds for `KINDS` in
+  `honeytokens.py` (4 bits, so at most 15 codes): a renumbered kind makes
+  every credential already planted decode as a different kind.
 - **`CRAWL_SITE_SEED` is fix-once, not a tunable.** Changing it regenerates
   every page and ETag, which breaks conditional-request measurement
   continuity (before/after become incomparable). Treat it like a migration,
