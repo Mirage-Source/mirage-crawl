@@ -38,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mirage_crawl.config import _parse_secret  # noqa: E402
-from mirage_crawl.publish import anonymize, attacked, sanitize  # noqa: E402
+from mirage_crawl.publish import anonymize, attacked, backfill_classifier, sanitize  # noqa: E402
 
 PREFIX = "crawl"
 MANIFEST = f"{PREFIX}/manifest.json"
@@ -117,9 +117,11 @@ def _events(path: Path):
         if not line:
             continue
         try:
-            yield json.loads(line)
+            event = json.loads(line)
         except json.JSONDecodeError:
             yield None
+            continue
+        yield backfill_classifier(event) if isinstance(event, dict) else event
 
 
 def export_day(path: Path, secret: bytes, salt: str, out: Path) -> dict:

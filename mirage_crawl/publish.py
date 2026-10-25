@@ -167,22 +167,36 @@ def _hash_ips_in(value: str, salt: str) -> str:
     return _IP_TOKEN.sub(sub, value)
 
 
+def _body_bytes(event: dict) -> bytes | None:
+    body = event.get("body")
+    if not isinstance(body, str):
+        return None
+    try:
+        return base64.b64decode(body) if event.get("body_encoding") == "base64" else body.encode("utf-8")
+    except (binascii.Error, ValueError):
+        return body.encode("utf-8", "replace")
+
+
+def backfill_classifier(event: dict) -> dict:
+    """Give a request logged before the classifier existed the same `attacks`,
+    `tools` and `oast` fields a live one has, so every published day has one
+    schema and a query over several days does not fail on a missing column.
+    Run on the raw event, before anything is redacted."""
+    if event.get("kind") == "request" and "attacks" not in event:
+        event.update(attacks.analyze(
+            event.get("raw_path") or event.get("path") or "", event.get("raw_query"),
+            event.get("headers") or [], _body_bytes(event),
+        ).event_fields())
+    return event
+
+
 def attacked(event: dict) -> bool:
     """Whether a request event carries an attack. Events logged before the
-    classifier existed have no `attacks` field; classify them now, so day-one
-    exploit payloads are not mistaken for a visitor's private data."""
-    if "attacks" in event:
-        return bool(event["attacks"])
-    body = event.get("body")
-    if isinstance(body, str):
-        try:
-            data = base64.b64decode(body) if event.get("body_encoding") == "base64" else body.encode("utf-8")
-        except (binascii.Error, ValueError):
-            data = body.encode("utf-8", "replace")
-    else:
-        data = None
-    return bool(attacks.classify(event.get("raw_path") or event.get("path") or "",
-                                 event.get("raw_query"), event.get("headers") or [], data))
+    classifier existed are classified now, so day-one exploit payloads are not
+    mistaken for a visitor's private data."""
+    if "attacks" not in event:
+        backfill_classifier(event)
+    return bool(event.get("attacks"))
 
 
 def anonymize(event: dict, salt: str, attack_rids: set[str]) -> dict:

@@ -97,6 +97,11 @@ with tempfile.TemporaryDirectory() as d:
     check("visitor cookie and credential redacted",
           "sid=visitor" not in published_text and "alice" not in published_text)
     check("manifest has checksum and size", len(entry["sha256"]) == 64 and entry["bytes"] > 0)
+    reqs = [e for e in out if e["kind"] == "request"]
+    check("every published request has the classifier fields, even from before the classifier",
+          all({"attacks", "tools", "oast"} <= set(e) for e in reqs), [sorted(e) for e in reqs])
+    old = [e for e in published(bucket, "crawl/events/day=2026-10-23.jsonl.gz")]
+    check("a legacy request gets the classifier fields too", all("attacks" in e for e in old))
 
     print("idempotence")
     again = export_r2.run(events, store, SECRET, SALT, now=ts("2026-10-25", 3), lag_s=3600)
