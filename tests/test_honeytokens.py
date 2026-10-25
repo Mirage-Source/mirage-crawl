@@ -114,6 +114,9 @@ def test_fill_and_decoys() -> None:
     out, _ = ht.fill(SECRET, "https://deploy:{{ht:git_credentials}}@{{host}}/x.git", "1.2.3.4",
                      now=NOW, host="sensor.example.test")
     check("fill substitutes our host", "@sensor.example.test/x.git" in out and "{{" not in out, out)
+    blanked = ht.blank(hunt.match("/.env").decoy)
+    check("decoys off: no placeholder and no token leaves the sensor",
+          "{{" not in blanked and "DB_PASSWORD=\n" in blanked and not scan(body=blanked.encode()), blanked)
 
 
 def test_false_positives() -> None:

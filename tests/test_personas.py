@@ -97,6 +97,18 @@ def test_webapp_classifier() -> None:
     check("root is a browse, served a landing page", r(path="/").kind == "browse" and r(path="/").status == 200)
     check("unknown path is a 404 browse", r(path="/nope").status == 404)
 
+    # A traversal that names a credential file gets the same decoy a direct
+    # probe of that file gets (placeholders the server fills per requester).
+    for path, query, marker in (
+        ("/../../../../../../proc/self/cwd/.aws/credentials", "", "{{ht:aws_access_key}}"),
+        ("/download.php", "file=../../../../var/www/.env", "{{ht:db_password}}"),
+        ("/download.php", "file=../../../../root/.git-credentials", "{{ht:git_credentials}}"),
+    ):
+        got = r(path=path, query=query)
+        check(f"credential-file traversal serves the honeytoken decoy ({marker})",
+              got.kind == "path_traversal" and marker in got.body, f"{got.kind} {got.body[:60]}")
+    check("passwd traversal still gets the synthetic passwd", "nologin" in trav.body and "{{" not in trav.body)
+
     # Determinism: the fake world is stable across restarts.
     other = webapp.respond("GET", "/x.php", "file=../../../../etc/passwd", "", "", b"different-key")
     check("fake passwd is seed-derived", trav.body != other.body)
@@ -154,6 +166,16 @@ async def test_live() -> None:
             # The PHP face: a traversal gets a page and a tagged event.
             php_status, php_headers, php_body = await get(
                 s, f"http://127.0.0.1:{php_port}/download.php?file=../../../../etc/passwd")
+            # A credential-file traversal is answered with planted credentials;
+            # replaying the planted password elsewhere must be detected.
+            env_status, _, env_body = await get(
+                s, f"http://127.0.0.1:{php_port}/download.php?file=../../../../var/www/.env")
+            planted = next((line.split("=", 1)[1] for line in env_body.splitlines()
+                            if line.startswith("DB_PASSWORD=")), "")
+            await post(s, f"http://127.0.0.1:{public_port}/wp-login.php",
+                       data=f"log=admin&pwd={planted}".encode(),
+                       headers={"Content-Type": "application/x-www-form-urlencoded",
+                                "Host": "docs.test.invalid"})
 
         await runner.cleanup()
         events = list(eventlog.read_events(cfg.log_dir))
@@ -192,9 +214,22 @@ async def test_live() -> None:
               php_headers.get("X-Powered-By"))
         check("served a synthetic passwd, not a real file", "/usr/sbin/nologin" in php_body)
         web = [e for e in hunts if e.get("web_attack")]
-        check("the traversal is logged, tagged, attributed to php",
-              len(web) == 1 and web[0]["web_attack"] == "path_traversal" and web[0]["family"] == "php",
+        check("the traversals are logged, tagged, attributed to php",
+              len(web) == 2 and all(e["web_attack"] == "path_traversal" and e["family"] == "php" for e in web),
               str([(e.get("web_attack"), e["family"]) for e in web]))
+
+        print("\nhoneytokens through the PHP face (live)")
+        check("credential-file traversal served a filled .env",
+              env_status == 200 and planted and "{{" not in env_body, env_body[:80])
+        issued = [h for e in hunts for h in e.get("honeytokens_issued") or ()]
+        check("issuance recorded on the hunt event",
+              "db_password" in {h["kind"] for h in issued}, str(issued))
+        reqs = [e for e in events if e["kind"] == eventlog.EVENT_REQUEST and e.get("honeytokens")]
+        check("the planted password replayed on another port is detected",
+              any(h["kind"] == "db_password" for e in reqs for h in e["honeytokens"]),
+              str([e.get("honeytokens") for e in reqs]))
+        check("passwd traversal issues no honeytokens",
+              not [e for e in web if "passwd" in (e.get("query") or "") and e.get("honeytokens_issued")])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

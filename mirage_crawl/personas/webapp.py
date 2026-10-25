@@ -33,7 +33,7 @@ import hmac
 import re
 from dataclasses import dataclass
 
-from .. import decode
+from .. import decode, hunt
 
 # Category for the event log, alongside hunt.py's CATEGORY_* set.
 CATEGORY_WEBAPP = "web_app"
@@ -92,6 +92,26 @@ _PHP_WRAPPER = re.compile(
     re.I,
 )
 _PHP_PATH = re.compile(r"\.php($|[/?])", re.I)
+
+
+_AFTER_TRAVERSAL = re.compile(r"(?:\.\.[\\/])+([^\s&?#]+)")
+
+
+def _credential_decoy(haystack: str) -> str | None:
+    """The honeytoken decoy for the credential file a traversal names, if any.
+
+    It is the same template a direct probe of that file gets from hunt.py, so
+    ".../proc/self/cwd/.env" and "/.env" show one consistent world. Each
+    "/"-suffix of the traversal target is tried ("var/www/.env" -> "/.env").
+    The template keeps its {{ht:...}} placeholders; the server fills them.
+    """
+    for m in _AFTER_TRAVERSAL.finditer(haystack):
+        parts = m.group(1).replace("\\", "/").split("/")
+        for i in range(len(parts)):
+            probe = hunt.match("/" + "/".join(parts[i:]))
+            if probe is not None and probe.decoy and "{{ht:" in probe.decoy:
+                return probe.decoy
+    return None
 
 
 def _peeled(*texts: str) -> str:
@@ -201,6 +221,15 @@ def respond(
     pq = _peeled(path, query)
     body = _peeled(body_text) if body_text else ""
 
+    if _TRAVERSAL.search(pq) or _AFTER_TRAVERSAL.search(pq):
+        planted = _credential_decoy(pq)
+        if planted is not None:
+            return Reply(
+                200, "text/plain", planted,
+                "path_traversal",
+                "read a credential file through path traversal (served planted credentials)",
+                ("T1083", "T1552.001"),
+            )
     if _TRAVERSAL.search(pq):
         return Reply(
             200, "text/plain", _fake_passwd(key),

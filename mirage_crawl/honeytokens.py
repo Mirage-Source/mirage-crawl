@@ -143,6 +143,12 @@ def render(secret: bytes, kind: str, ip: str, now: float | None = None) -> Crede
 _PLACEHOLDER = re.compile(r"\{\{ht:(aws_access_key|aws_secret|api_key|db_password|git_credentials)\}\}")
 
 
+def blank(text: str) -> str:
+    """The decoy with every placeholder emptied: what is served when
+    CRAWL_HUNT_DECOYS is off, so a raw placeholder never leaves the sensor."""
+    return _PLACEHOLDER.sub("", text.replace("{{host}}", "localhost"))
+
+
 def fill(
     secret: bytes, text: str, ip: str, now: float | None = None, host: str | None = None
 ) -> tuple[str, list[dict]]:

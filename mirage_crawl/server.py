@@ -769,6 +769,15 @@ class Sensor:
                 self._decoy_key,
             )
             request["resource_kind"] = f"webapp:{reply.kind}"
+            # A credential-file reply carries honeytoken placeholders: minted
+            # for this requester when decoys are on, blanked when they are off.
+            reply_body, issued = reply.body, []
+            if "{{" in reply_body:
+                if self.config.hunt_decoys:
+                    reply_body, issued = honeytokens.fill(
+                        self.secret, reply_body, request["ip"], host=self._own_host)
+                else:
+                    reply_body = honeytokens.blank(reply_body)
             self.emit(
                 request, eventlog.EVENT_HUNT, ip=request["ip"], method=request.method,
                 path=request.path, query=request.query_string or None,
@@ -779,9 +788,10 @@ class Sensor:
                 body_sha256=capture.body_fields(body, 0).get("body_sha256") if body is not None else None,
                 indicators=(request["findings"].as_dict() if request["findings"].any() else None),
                 decoy_served=self.config.hunt_decoys,
+                honeytokens_issued=issued or None,
             )
             return web.Response(
-                status=reply.status, text=reply.body,
+                status=reply.status, text=reply_body,
                 content_type=reply.content_type, charset="utf-8",
                 headers={"Cache-Control": "no-store"},
             )
