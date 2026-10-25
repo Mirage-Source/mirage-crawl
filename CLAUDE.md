@@ -58,8 +58,12 @@ they're made, not backfilled.
 Standalone today — no database, no shared state, not yet wired to
 `mirage-fleet` or `mirage-web`. See the root `../CLAUDE.md` for the target
 direction (an operator picking sensor types from `mirage-web`, `mirage-fleet`
-staying sensor-agnostic) that this repo will eventually plug into. Wallet
-addresses extracted by `hunt.py`'s payload scanner are the join key to
-`mirage-core`'s SSH-side extraction — the same actor dropping a miner over
-SSH and probing GPU infra over HTTP should become one entity, not two,
-whenever that correlation gets built.
+staying sensor-agnostic) that this repo will eventually plug into. Cross-sensor
+correlation goes through `docs/ACTOR-SCHEMA.md` (`mirage.actor/1`, exported by
+`mirage_crawl/actors.py`): records join only on *strong* indicators (wallets,
+payload hosts/URLs, exploit-body hashes, OAST domains, honeytokens), never on
+source IP or credential pairs alone. mirage-core does not extract indicators
+yet. Its exporter is unbuilt and must pass `docs/actor-schema/vectors.json`, or
+the same miner dropped over SSH and over HTTP will not become one entity.
+Don't change a normalisation rule or a type's strength without bumping the
+schema version.

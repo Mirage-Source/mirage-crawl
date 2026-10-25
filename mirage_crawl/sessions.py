@@ -83,6 +83,13 @@ class Session:
     # payload by definition: someone acted on a credential we planted.
     honeytokens_issued: set[str] = field(default_factory=set)
     honeytokens_used: set[str] = field(default_factory=set)
+    # Kept for the shared actor export (actors.py): the values themselves,
+    # not just counts, because they are the cross-sensor join keys.
+    sensors: set[str] = field(default_factory=set)
+    header_orders: set[str] = field(default_factory=set)
+    attack_body_hashes: set[str] = field(default_factory=set)
+    honeytoken_tokens: set[str] = field(default_factory=set)
+    credential_pairs: set[tuple] = field(default_factory=set)
     mitre: set[str] = field(default_factory=set)
 
     wallets: dict[str, set[str]] = field(default_factory=dict)
@@ -157,6 +164,10 @@ class Session:
             self.faces.add(e["face"])
         if self.actor_basis is None:
             self.actor_basis = e.get("actor_basis")
+        if e.get("sensor"):
+            self.sensors.add(e["sensor"])
+        if e.get("header_order_hash"):
+            self.header_orders.add(e["header_order_hash"])
 
         kind = e.get("kind")
         if kind == eventlog.EVENT_REQUEST:
@@ -170,6 +181,11 @@ class Session:
             self.tools.update(t["name"] for t in e.get("tools") or ())
             self.oast.update(e.get("oast") or ())
             self.honeytokens_used.update(h["kind"] for h in e.get("honeytokens") or ())
+            self.honeytoken_tokens.update(h["token"] for h in e.get("honeytokens") or () if h.get("token"))
+            # The exploit body's hash clusters one kit across many addresses;
+            # an ordinary request body's hash says nothing, so only attacks.
+            if e.get("attacks") and e.get("body_sha256"):
+                self.attack_body_hashes.add(e["body_sha256"])
         elif kind == eventlog.EVENT_POLICY_READ:
             if e.get("standard"):
                 self.standards_read.add(e["standard"])
@@ -192,6 +208,8 @@ class Session:
             self._absorb_indicators(e.get("indicators"))
         elif kind == eventlog.EVENT_CREDENTIAL:
             self.credential_attempts += 1
+            if len(self.credential_pairs) < 100:
+                self.credential_pairs.add((e.get("user"), e.get("password")))
 
         self.mitre.update(e.get("mitre") or ())
 
