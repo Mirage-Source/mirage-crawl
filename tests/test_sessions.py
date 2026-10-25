@@ -54,6 +54,19 @@ EVENTS = [
      "ip": "2.2.2.3", "face": "php", "family": "php", "category": "web_app",
      "web_attack": "sqli", "mitre": ["T1190"], "method": "GET", "path": "/item.php"},
 
+    # A3: one request carrying an attack but no hard indicator (the live
+    # React2Shell shape), which the stage ladder used to miss entirely.
+    {"kind": "request", "ts": "2026-10-24T12:00:00Z", "actor": "A3", "actor_basis": "ja4",
+     "ip": "3.3.3.3", "ja4": "J3", "ua": "Mozilla/5.0", "face": "attack", "method": "POST", "path": "/",
+     "status": 200,
+     "attacks": [{"cls": "deserialization", "location": "body:0", "evidence": "$1:__proto__:then",
+                  "decoded": False, "sig": "react2shell", "cve": "CVE-2025-55182"}],
+     "tools": [{"name": "bissa", "kind": "exploit_kit"}], "oast": ["c0ffee.oast.fun"]},
+    # A4: a scanner that names itself but sends no payload stays below 'payload'.
+    {"kind": "request", "ts": "2026-10-24T12:00:05Z", "actor": "A4", "actor_basis": "header_order",
+     "ip": "4.4.4.4", "ua": "Mozilla/5.0 zgrab/0.x", "face": "attack", "method": "GET", "path": "/",
+     "status": 200, "attacks": None, "tools": [{"name": "zgrab", "kind": "scanner"}], "oast": None},
+
     # An identity event has no actor; it must not crash the grouping or create
     # a bogus session.
     {"kind": "identity", "ts": "2026-10-24T11:00:20Z", "ip": "2.2.2.2",
@@ -76,8 +89,14 @@ def test_grouping() -> None:
         log = _write_log(Path(t))
         sess = sessions.build_sessions(log)
 
-        check("one session per actor, no bogus session from actorless events", set(sess) == {"A1", "A2"},
-              str(sorted(sess)))
+        check("one session per actor, no bogus session from actorless events",
+              set(sess) == {"A1", "A2", "A3", "A4"}, str(sorted(sess)))
+        a3, a4 = sess["A3"], sess["A4"]
+        check("A3 attack class absorbed", a3.attack_classes == {"deserialization": 1}, str(a3.attack_classes))
+        check("A3 cve absorbed", a3.cves == {"CVE-2025-55182"}, str(a3.cves))
+        check("A3 tool and oast absorbed", a3.tools == {"bissa"} and a3.oast == {"c0ffee.oast.fun"})
+        check("A3 attack alone reaches 'payload'", a3.stage_reached == "payload", a3.stage_reached)
+        check("A4 tool without attack is not 'payload'", a4.stage_reached == "seen", a4.stage_reached)
         a1, a2 = sess["A1"], sess["A2"]
 
         check("A1 basis is ja4", a1.actor_basis == "ja4")
@@ -121,14 +140,15 @@ def test_filters_and_json() -> None:
         log = _write_log(Path(t))
         allsess = sessions.build_sessions(log)
         payload = sessions.filter_sessions(allsess, has_payload=True)
-        check("has_payload keeps only the attacker", set(payload) == {"A2"}, str(set(payload)))
+        check("has_payload keeps only the attackers", set(payload) == {"A2", "A3"}, str(set(payload)))
         actor = sessions.filter_sessions(allsess, actor="A1")
         check("actor filter narrows to one", set(actor) == {"A1"})
 
         d = allsess["A2"].as_dict()
         check("as_dict is json-serialisable", json.loads(json.dumps(d))["actor"] == "A2")
         for key in ("actor", "actor_basis", "ips", "ja4s", "stage_reached", "wallets",
-                    "web_attacks", "mitre", "timeline", "first_seen", "last_seen"):
+                    "web_attacks", "attack_classes", "cves", "tools", "oast",
+                    "mitre", "timeline", "first_seen", "last_seen"):
             check(f"as_dict has {key}", key in d)
 
 

@@ -73,6 +73,11 @@ class Session:
     walked_multistage: bool = False
 
     web_attacks: set[str] = field(default_factory=set)
+    # From the attack classifier on request events: class -> request count.
+    attack_classes: dict[str, int] = field(default_factory=dict)
+    cves: set[str] = field(default_factory=set)
+    tools: set[str] = field(default_factory=set)
+    oast: set[str] = field(default_factory=set)
     exploits: set[str] = field(default_factory=set)
     mitre: set[str] = field(default_factory=set)
 
@@ -94,6 +99,7 @@ class Session:
         return bool(
             self.wallets or self.pools or self.payload_urls or self.miners
             or self.credential_attempts
+            or self.attack_classes
             or (self.web_attacks & _PAYLOAD_ATTACKS)
         )
 
@@ -151,6 +157,13 @@ class Session:
         if kind == eventlog.EVENT_REQUEST:
             self.request_count += 1
             self._absorb_indicators(e.get("indicators"))
+            # An attack is a payload by definition (recon stays in hunt events),
+            # so it counts toward the stage even with no hard indicator.
+            for cls in {a["cls"] for a in e.get("attacks") or ()}:
+                self.attack_classes[cls] = self.attack_classes.get(cls, 0) + 1
+            self.cves.update(a["cve"] for a in e.get("attacks") or () if a.get("cve"))
+            self.tools.update(t["name"] for t in e.get("tools") or ())
+            self.oast.update(e.get("oast") or ())
         elif kind == eventlog.EVENT_POLICY_READ:
             if e.get("standard"):
                 self.standards_read.add(e["standard"])
@@ -208,6 +221,10 @@ class Session:
             "decoy_served": self.decoy_served,
             "walked_multistage": self.walked_multistage,
             "web_attacks": sorted(self.web_attacks),
+            "attack_classes": dict(sorted(self.attack_classes.items())),
+            "cves": sorted(self.cves),
+            "tools": sorted(self.tools),
+            "oast": sorted(self.oast),
             "exploits": sorted(self.exploits),
             "mitre": sorted(self.mitre),
             "wallets": {k: sorted(v) for k, v in self.wallets.items()},
@@ -276,6 +293,10 @@ def _print_summary(sessions: dict[str, Session]) -> None:
             what_bits.append("/".join(sorted(s.families)))
         if s.web_attacks:
             what_bits.append("+".join(sorted(s.web_attacks)))
+        if s.attack_classes:
+            what_bits.append("+".join(sorted(s.attack_classes)))
+        if s.tools:
+            what_bits.append("tool:" + ",".join(sorted(s.tools)))
         if s.standards_read:
             what_bits.append("read:" + ",".join(sorted(s.standards_read)))
         if s.wallets or s.miners:
@@ -301,6 +322,8 @@ def _print_one(s: Session) -> None:
         print(f"  payload: wallets={d['wallets']} pools={d['pools']} miners={d['miners']} urls={d['payload_urls']}")
     if s.exploits or s.web_attacks:
         print(f"  attacks: exploits={sorted(s.exploits)} web={sorted(s.web_attacks)}")
+    if s.attack_classes or s.tools or s.oast:
+        print(f"  classified: {d['attack_classes']} cves={d['cves']} tools={d['tools']} oast={d['oast']}")
     if s.credential_attempts:
         print(f"  credentials attempted: {s.credential_attempts}")
     if s.mitre:

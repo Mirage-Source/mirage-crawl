@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from . import beacons, capture, credentials, eventlog, hunt, personas, policies
+from . import attacks, beacons, capture, credentials, eventlog, hunt, personas, policies
 from .config import Config
 from .fingerprint import build as build_fingerprint
 from .identity import RangeTable, VerifierCache
@@ -336,7 +336,14 @@ class Sensor:
             raw_path, raw_query, headers, request["body"], self._own_host
         )
         request["findings"] = findings
-        version = f"{request.version.major}.{request.version.minor}"
+        # A classifier bug must never cost the request event itself.
+        try:
+            analysis = attacks.analyze(
+                raw_path, raw_query, headers, request["body"].data if request["body"] else None
+            ).event_fields()
+        except Exception:
+            analysis = {"attacks": None, "tools": None, "oast": None, "classify_error": True}
+        version =f"{request.version.major}.{request.version.minor}"
         fp = build_fingerprint(user_agent=ua, raw_header_names=raw_names, http_version=version)
         request["fp"] = fp
         request["ip"] = ip
@@ -405,6 +412,7 @@ class Sensor:
             fork_of=request.get("fork_of"),
             indicators=findings.as_dict() if findings.any() else None,
             indicator_locations=indicator_locations or None,
+            **analysis,
             **capture.body_fields(request["body"], self.config.body_log_bytes),
         )
 

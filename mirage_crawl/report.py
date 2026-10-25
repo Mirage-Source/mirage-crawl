@@ -190,6 +190,45 @@ def main(argv: list[str] | None = None) -> int:
         for name, count in exploited.most_common():
             print(f"  {name:18s} {count} client(s)")
 
+    attackers = [p for p in profiles.values() if p.attack_classes]
+    if attackers:
+        attacked = [e for e in events if e.get("kind") == eventlog.EVENT_REQUEST and e.get("attacks")]
+        print("\n" + "-" * 74)
+        print("ATTACKS  (a payload was sent; path-only probes are under RECONNAISSANCE)")
+        print("-" * 74)
+        decoded = sum(1 for e in attacked if any(a.get("decoded") for a in e["attacks"]))
+        print(f"  {len(attacked)} request(s) from {len({e.get('ip') for e in attacked})} address(es); "
+              f"{decoded} matched only after decoding")
+        print("\n  by class                requests  clients")
+        classes = Counter(c for p in attackers for c in p.attack_classes)
+        for cls, clients in classes.most_common():
+            reqs = sum(p.attack_classes.get(cls, 0) for p in attackers)
+            print(f"    {cls:22s} {reqs:6d}  {clients:7d}")
+        locations = Counter()
+        for p in attackers:
+            locations.update(p.attack_locations)
+        print("\n  by location  " + "  ".join(f"{k}={v}" for k, v in locations.most_common()))
+        cves = Counter(c for p in attackers for c in p.cves)
+        if cves:
+            print("\n  named exploits")
+            for cve, clients in cves.most_common(12):
+                print(f"    {cve:22s} {clients} client(s)")
+
+    tooled = [p for p in profiles.values() if p.tools]
+    if tooled:
+        print("\n" + "-" * 74)
+        print("TOOLS  (named by user agent or payload marker)")
+        print("-" * 74)
+        by_tool = Counter((name, kind) for p in tooled for name, kind in p.tools.items())
+        for (name, kind), clients in sorted(by_tool.items(), key=lambda x: (x[0][1], -x[1])):
+            print(f"  {kind:12s} {name:24s} {clients} client(s)")
+
+    oast = sorted({d for p in profiles.values() for d in p.oast})
+    if oast:
+        print("\n  out-of-band callback domains (attacker infrastructure, never resolved)")
+        for domain in oast[:12]:
+            print(f"    {domain}")
+
     ja4s = Counter(j for p in profiles.values() for j in p.ja4)
     if ja4s:
         print("\n" + "-" * 74)

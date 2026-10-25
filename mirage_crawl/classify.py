@@ -92,6 +92,13 @@ class Profile:
     mitre: set[str] = field(default_factory=set)
     # Exploit attempts seen anywhere in this client's requests.
     exploits: set[str] = field(default_factory=set)
+    # From the attack classifier: class -> requests carrying it.
+    attack_classes: dict[str, int] = field(default_factory=dict)
+    attack_locations: dict[str, int] = field(default_factory=dict)
+    attacks_decoded: int = 0
+    cves: set[str] = field(default_factory=set)
+    tools: dict[str, str] = field(default_factory=dict)   # name -> kind
+    oast: set[str] = field(default_factory=set)
     credential_attempts: int = 0
 
     _paths_seen: dict[str, int] = field(default_factory=lambda: defaultdict(int), repr=False)
@@ -159,6 +166,12 @@ class Profile:
             "miners": sorted(self.miners),
             "mitre": sorted(self.mitre),
             "exploits": sorted(self.exploits),
+            "attack_classes": dict(sorted(self.attack_classes.items())),
+            "attack_locations": dict(sorted(self.attack_locations.items())),
+            "attacks_decoded": self.attacks_decoded,
+            "cves": sorted(self.cves),
+            "tools": dict(sorted(self.tools.items())),
+            "oast": sorted(self.oast),
             "credential_attempts": self.credential_attempts,
         }
 
@@ -191,6 +204,24 @@ def _absorb_indicators(p: Profile, indicators: dict | None) -> None:
         p.exploits.add("shellshock")
     if indicators.get("metadata_ssrf"):
         p.exploits.add("metadata_ssrf")
+
+
+def _absorb_attacks(p: Profile, event: dict) -> None:
+    found = event.get("attacks") or ()
+    for cls in {a["cls"] for a in found}:
+        p.attack_classes[cls] = p.attack_classes.get(cls, 0) + 1
+    for a in found:
+        # "query:id" and "query:file" both count as "query": the kind of
+        # location is what the report compares, not the parameter name.
+        kind = a["location"].split(":", 1)[0]
+        p.attack_locations[kind] = p.attack_locations.get(kind, 0) + 1
+        if a.get("cve"):
+            p.cves.add(a["cve"])
+    if any(a.get("decoded") for a in found):
+        p.attacks_decoded += 1
+    for t in event.get("tools") or ():
+        p.tools[t["name"]] = t["kind"]
+    p.oast.update(event.get("oast") or ())
 
 
 def _key(ua: str, claimed: str | None) -> tuple[str, str]:
@@ -244,6 +275,7 @@ def build_profiles(log_dir: str | Path) -> dict[tuple[str, str], Profile]:
             # Every request is scanned, not just hunt routes, so indicators
             # are read from the request stream.
             _absorb_indicators(p, event.get("indicators"))
+            _absorb_attacks(p, event)
 
             content_hash = event.get("content_hash")
             if content_hash:

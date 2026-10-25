@@ -237,8 +237,23 @@ async def test_live() -> None:
         check("shellshock in a Cookie is found", shock_found.get("shellshock") is True, str(shock_found))
         check("URL inside a header payload is kept", any("198.51.100.7" in u for u in shock_found.get("urls", [])))
 
+        print("\nattack classification (live)")
+        attack_set = lambda e: {(a["cls"], a["location"]) for a in (e or {}).get("attacks") or ()}  # noqa: E731
+        check("log4shell in a User-Agent is classified",
+              ("log4shell", "header:User-Agent") in attack_set(log4j), str(attack_set(log4j)))
+        check("sqli in a raw query parameter is classified",
+              ("sqli", "query:id") in attack_set(trav), str(attack_set(trav)))
+        check("shellshock in a Cookie is classified",
+              ("shellshock", "header:Cookie") in attack_set(shock), str(attack_set(shock)))
+        check("a crawler request carries no attacks, tools or oast",
+              bool(crawler) and crawler.get("attacks") is None and crawler.get("tools") is None
+              and crawler.get("oast") is None, str(crawler and {k: crawler.get(k) for k in ("attacks", "tools")}))
+
         from mirage_crawl.classify import build_profiles
         profiles = build_profiles(cfg.log_dir)
+        check("profile counts attack classes",
+              any(p.attack_classes.get("log4shell") for p in profiles.values()),
+              str([p.attack_classes for p in profiles.values()]))
         holders = [p for p in profiles.values() if p.wallets.get("monero")]
         check("profile collects wallets from any request", bool(holders))
         check("profile records exploit markers",
