@@ -162,6 +162,16 @@ RULES: tuple[Rule, ...] = (
     _rule("php_code", "thinkphp-invokefunction",
           r"think[\\/]+app[\\/]+invoke(?:function|class)",
           "path query body", cve="CVE-2018-20062"),
+    # PHP2Shell (Oct 2026, CVE-2026-109618/109619) is reported to be reachable
+    # through PHP's session upload-progress handling, which a request opts into
+    # by sending a multipart field with this exact default name. The name is the
+    # signal, not the value: the rule gates on the parameter name and matches
+    # any short value, so the field is labelled even when it is empty.
+    # No `cve` on purpose. The field is the surface the bugs sit behind, not
+    # proof of exploitation (a harmless progress-bar upload carries it too), so
+    # it is recorded as a signature and left for the analyst to attribute.
+    _rule("php_code", "php-session-upload-progress", r"^.{0,64}",
+          "body", params=r"^PHP_SESSION_UPLOAD_PROGRESS$", sig="php-session-upload-progress"),
     _rule("php_code", "php-open-tag",
           r"<\?(?:php\b|=)|<\?\s*(?:echo|eval|system|exec|passthru|shell_exec|assert|include|require)\b",
           "query body"),

