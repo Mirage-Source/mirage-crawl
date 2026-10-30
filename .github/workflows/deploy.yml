@@ -3,8 +3,8 @@ name: Deploy mirage-crawl
 # Manual deploy of the HTTP sensor. Anyone with write access to this repo can run it, so the SSH key behind it is
 # restricted to deploy/deploy.sh, which accepts only a 40-hex commit SHA (server setup: deploy/DEPLOY.md).
 #
-# What it does: tests the chosen commit, then asks the server to check out exactly that SHA and restart the sensor.
-# Rollback is the same workflow with an older ref. It never touches data/ or .env on the server.
+# What it does: tests the chosen commit, then asks the server to check out exactly that SHA and rebuild the containers.
+# Rollback is the same workflow with an older ref. It never touches the data volumes or .env on the server.
 #
 # Every deploy changes what the sensor shows or records, so it is a research-era boundary: add a planned entry to
 # mirage-lab ledger/CHANGES.md first and tick the box below.
@@ -67,7 +67,7 @@ jobs:
           port: ${{ secrets.CRAWL_DEPLOY_PORT }}
           username: ${{ secrets.CRAWL_DEPLOY_USER }}
           key: ${{ secrets.CRAWL_DEPLOY_KEY }}
-          script: /opt/mirage-crawl/deploy/deploy.sh ${{ needs.test.outputs.sha }}
+          script: /opt/mirage/mirage-crawl/deploy/deploy.sh ${{ needs.test.outputs.sha }}
       - name: Ledger row for mirage-lab
         env:
           SHA: ${{ needs.test.outputs.sha }}
