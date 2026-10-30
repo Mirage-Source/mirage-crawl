@@ -30,11 +30,21 @@ def _path_or_none(name: str, default: str) -> Path | None:
     return Path(raw) if raw else None
 
 
+
+def build_id(env=None) -> str:
+    """The commit this process was built from, taken from BUILD_SHA (set by the deploy), or "unknown".
+
+    Only hex is accepted, so a bad value can never inject text into the event log."""
+    raw = (env if env is not None else os.environ).get("BUILD_SHA", "")
+    return raw[:12] if re.fullmatch(r"[0-9a-f]{7,40}", raw) else "unknown"
+
+
 @dataclass
 class Config:
     host: str = "0.0.0.0"
     port: int = 8080
     sensor_id: str = "crawl-01"
+    build: str = "unknown"
     origin: str = "http://localhost:8080"
 
     log_dir: Path = field(default_factory=lambda: Path("data/events"))
@@ -104,6 +114,7 @@ class Config:
             host=os.environ.get("CRAWL_HOST", "0.0.0.0"),
             port=_int("CRAWL_PORT", 8080),
             sensor_id=os.environ.get("CRAWL_SENSOR_ID", "crawl-01"),
+            build=build_id(),
             origin=os.environ.get("CRAWL_ORIGIN", "").rstrip("/"),
             log_dir=Path(os.environ.get("CRAWL_LOG_DIR", "data/events")),
             secret_file=Path(os.environ.get("CRAWL_SECRET_FILE", "data/beacon.secret")),

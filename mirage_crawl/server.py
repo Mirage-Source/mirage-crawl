@@ -150,7 +150,7 @@ class Sensor:
             pages_per_project=config.pages_per_project,
             fork_every=config.fork_every,
         )
-        self.log = eventlog.EventLog(config.log_dir, config.sensor_id)
+        self.log = eventlog.EventLog(config.log_dir, config.sensor_id, build=config.build)
 
         self.ranges = RangeTable()
         loaded = self.ranges.load_file(config.ranges_file)

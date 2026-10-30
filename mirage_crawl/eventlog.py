@@ -35,7 +35,8 @@ EVENT_SENSOR = "sensor"
 
 class EventLog:
     def __init__(
-        self, directory: str | Path, sensor_id: str, queue_size: int = 10_000, prefix: str = ""
+        self, directory: str | Path, sensor_id: str, queue_size: int = 10_000, prefix: str = "",
+        build: str = "unknown",
     ) -> None:
         # A separate process (the TLS front) writes with its own prefix, so two
         # processes never append to the same file.
@@ -43,6 +44,7 @@ class EventLog:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.sensor_id = sensor_id
+        self.build = build
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
         self._task: asyncio.Task | None = None
         self._handle = None
@@ -86,6 +88,7 @@ class EventLog:
             "kind": kind,
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "sensor": self.sensor_id,
+            "build": self.build,
             **fields,
         }
         try:

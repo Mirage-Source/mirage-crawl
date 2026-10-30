@@ -19,6 +19,10 @@ COPY . .
 # fleet_queue volume -- see mirage-core's DEPLOYMENT.md.)
 RUN mkdir -p /app/data && chown -R crawl:crawl /app/data /app/config
 
+# Which commit this image was built from; every event records it. Set by deploy/deploy.sh.
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=$BUILD_SHA
+
 USER crawl
 EXPOSE 8080
 CMD ["python", "run.py"]
