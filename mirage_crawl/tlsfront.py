@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from . import eventlog
+from .config import build_id
 from . import ja4 as ja4mod
 
 HEAD_LIMIT = 32 * 1024
@@ -458,7 +459,7 @@ async def serve(args) -> None:
         alpn = ",".join(getattr(hello, "alpn", ()) or ())
         print(f"{ip}  ja4={fingerprint or '-'}  sni={sni or '-'}  alpn={alpn or '-'}")
 
-    log = eventlog.EventLog(args.log_dir, args.sensor_id, prefix="tls-")
+    log = eventlog.EventLog(args.log_dir, args.sensor_id, prefix="tls-", build=build_id())
     await log.start()
     front = Front(
         cert=args.cert,

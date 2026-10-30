@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     env_file: .env
     environment:
       CRAWL_HOST: 0.0.0.0
@@ -45,6 +47,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     command:
       - python
       - -m
